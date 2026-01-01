@@ -207,13 +207,14 @@ def parse_polish_amount(text: str) -> D:
     # Remove any leading/trailing whitespace
     text = text.strip()
 
+    # Remove thousands separators (spaces or non-breaking spaces) FIRST
+    text = re.sub(r'[\s\u00a0]+', '', text)
+
     # Handle malformed amounts where two columns merged with double dash
-    # e.g., "650--12.99" should be parsed as "-12.99"
+    # e.g., "650--12,99" should be parsed as "-12,99"
+    # This happens when phone numbers like "650-253-0000" get captured with amounts
     if '--' in text:
         text = '-' + text.split('--')[-1]
-
-    # Remove thousands separators (spaces or non-breaking spaces)
-    text = re.sub(r'[\s\u00a0]+', '', text)
 
     # Replace comma with period for decimal
     text = text.replace(',', '.')
