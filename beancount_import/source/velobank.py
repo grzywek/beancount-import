@@ -196,6 +196,7 @@ def parse_polish_amount(text: str) -> D:
     - "1 500,00"
     - "-45,00"
     - "20 000,00"
+    - "650--12.99" (malformed: two columns merged, take second part)
 
     Args:
         text: Amount string in Polish format.
@@ -205,6 +206,11 @@ def parse_polish_amount(text: str) -> D:
     """
     # Remove any leading/trailing whitespace
     text = text.strip()
+
+    # Handle malformed amounts where two columns merged with double dash
+    # e.g., "650--12.99" should be parsed as "-12.99"
+    if '--' in text:
+        text = '-' + text.split('--')[-1]
 
     # Remove thousands separators (spaces or non-breaking spaces)
     text = re.sub(r'[\s\u00a0]+', '', text)
@@ -323,6 +329,9 @@ def parse_old_format(text: str, filename: str) -> StatementInfo:
         iban_match = iban_pattern.search(line)
         if iban_match:
             account_iban = re.sub(r'\s+', '', iban_match.group(1))
+            # Normalize: ensure IBAN has PL prefix (old format doesn't include it)
+            if account_iban and not account_iban.startswith('PL'):
+                account_iban = 'PL' + account_iban
 
     # Parse transactions
     transactions = _parse_old_format_transactions(
