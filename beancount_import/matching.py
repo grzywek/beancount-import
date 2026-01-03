@@ -303,6 +303,13 @@ class PostingDatabase(object):
 
     def get_date_currency_postings(self, key: DateCurrencyKey) -> List[SearchPosting]:
         if self._date_currency_dirty[key]:
+            # DEBUG: Check for invalid number types before sorting
+            for sp in self._date_currency[key]:
+                if sp.number is not None and not isinstance(sp.number, Decimal):
+                    print(f"[matching.py DEBUG] Invalid SearchPosting.number type: {type(sp.number)}")
+                    print(f"[matching.py DEBUG] SearchPosting: number={sp.number}, key={sp.key}")
+                    print(f"[matching.py DEBUG] Entry date={sp.entry.date}, payee={sp.entry.payee}")
+                    print(f"[matching.py DEBUG] Posting account={sp.mp.posting.account}, units={sp.mp.posting.units}")
             self._date_currency[key].sort()
             self._date_currency_dirty[key] = False
         return self._date_currency[key]
