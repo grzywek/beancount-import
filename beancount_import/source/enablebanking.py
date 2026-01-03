@@ -169,6 +169,11 @@ def _parse_transaction(txn_data: dict, account_id: str, bank: str) -> Optional[E
     if amount is None:
         return None
     
+    # Validate that amount is an actual Decimal instance, not the class
+    if not isinstance(amount, Decimal):
+        print(f"[enablebanking] ERROR: amount is not Decimal instance: {type(amount)} for {entry_ref}")
+        return None
+    
     # Credit/debit indicator
     indicator = txn_data.get('credit_debit_indicator', 'DBIT')
     
