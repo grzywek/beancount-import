@@ -196,6 +196,10 @@ def is_unknown_account(account: str):
 def get_posting_weight(posting: Posting) -> Optional[Amount]:
     if posting.units is MISSING or posting.units is None:
         return None
+    
+    # Also check if the number component is MISSING
+    if posting.units.number is MISSING or posting.units.number is None:
+        return None
 
     if posting.cost is not None and posting.cost.currency is not None:
         posting = booking_full.convert_costspec_to_cost(posting)
