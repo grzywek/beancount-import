@@ -68,6 +68,7 @@ from beancount.core.amount import Amount
 from . import ImportResult, Source, SourceResults, InvalidSourceReference
 from ..matching import FIXME_ACCOUNT
 from ..journal_editor import JournalEditor
+from .enablebanking_rules import get_payee_narration
 
 
 # Metadata keys (standardized across all bank sources)
@@ -482,36 +483,58 @@ class EnableBankingSource(Source):
                 txns_by_account[txn.account_id] = []
             txns_by_account[txn.account_id].append(txn)
 
-        # Generate balance assertions from transactions with balance_after
+        # Generate monthly balance assertions from transactions with balance_after
+        # For each account, group transactions by month and generate balance at end of each month
+        # Only generate for completed months (not the current month)
+        today = datetime.date.today()
+        current_year_month = (today.year, today.month)
+        
         for account_id, txns in txns_by_account.items():
+            target_account = self._get_account_for_id(account_id)
+            # Skip if account is not mapped
+            if target_account is None:
+                continue
+            
             # Sort by date
             txns.sort(key=lambda t: t.booking_date)
             
-            # Find the last transaction with balance_after
-            for txn in reversed(txns):
+            # Group transactions by year-month
+            # Find the last transaction with balance_after for each month
+            monthly_balances: Dict[Tuple[int, int], EnableBankingTransaction] = {}
+            
+            for txn in txns:
                 if txn.balance_after is not None:
-                    target_account = self._get_account_for_id(account_id)
-                    # Skip if account is not mapped
-                    if target_account is None:
-                        break
-                    balance_date = txn.booking_date + datetime.timedelta(days=1)
-                    
-                    results.add_pending_entry(
-                        ImportResult(
-                            date=balance_date,
-                            entries=[
-                                Balance(
-                                    date=balance_date,
-                                    meta=None,
-                                    account=target_account,
-                                    amount=Amount(txn.balance_after, txn.currency),
-                                    tolerance=None,
-                                    diff_amount=None,
-                                )
-                            ],
-                            info=get_info(txn),
-                        ))
-                    break  # Only one balance per account
+                    year_month = (txn.booking_date.year, txn.booking_date.month)
+                    # Keep updating - the last one in the month will be kept
+                    monthly_balances[year_month] = txn
+            
+            # Generate balance assertion for each completed month
+            for (year, month), txn in monthly_balances.items():
+                # Skip current month - it's not complete yet
+                if (year, month) == current_year_month:
+                    continue
+                
+                # Balance date is the 1st of the next month
+                if month == 12:
+                    balance_date = datetime.date(year + 1, 1, 1)
+                else:
+                    balance_date = datetime.date(year, month + 1, 1)
+                
+                results.add_pending_entry(
+                    ImportResult(
+                        date=balance_date,
+                        entries=[
+                            Balance(
+                                date=balance_date,
+                                meta=None,
+                                account=target_account,
+                                amount=Amount(txn.balance_after, txn.currency),
+                                tolerance=None,
+                                diff_amount=None,
+                            )
+                        ],
+                        info=get_info(txn),
+                    ))
 
         # Check for invalid references
         for ref, postings in matched_ids.items():
@@ -600,38 +623,45 @@ class EnableBankingSource(Source):
             print(f"[enablebanking] ERROR: neg_amount.number is {type(neg_amount.number)}: {neg_amount}")
 
         # Determine payee and narration
-        # For card payments, the merchant is usually in remittance_information
-        # For transfers, use the counterparty or bank name
-        is_card_payment = txn.bank_transaction_code in ('CARD_PAYMENT', 'OTP_PAYMENT')
-        
-        if counterparty:
-            payee = counterparty
-            # Use first remittance line as narration
-            if txn.remittance_information:
-                narration = txn.remittance_information[0]
-            elif txn.bank_transaction_code:
-                narration = txn.bank_transaction_code
-            else:
-                narration = 'Transaction'
-        elif is_card_payment and txn.remittance_information:
-            # Card payment without counterparty - use remittance as payee (merchant name)
-            payee = txn.remittance_information[0]
-            # Use second line as narration if available, otherwise transaction type
-            if len(txn.remittance_information) > 1:
-                narration = txn.remittance_information[1]
-            elif txn.bank_transaction_code:
-                narration = txn.bank_transaction_code
-            else:
-                narration = 'Transaction'
+        # First try bank-specific rules
+        parsed = get_payee_narration(txn)
+        if parsed:
+            payee = parsed.payee
+            narration = parsed.narration
         else:
-            # For TRANSFER, EXCHANGE, TOPUP etc. - use bank name as payee
-            payee = txn.bank
-            if txn.remittance_information:
-                narration = txn.remittance_information[0]
-            elif txn.bank_transaction_code:
-                narration = txn.bank_transaction_code
+            # Fallback to generic logic
+            # For card payments, the merchant is usually in remittance_information
+            # For transfers, use the counterparty or bank name
+            is_card_payment = txn.bank_transaction_code in ('CARD_PAYMENT', 'OTP_PAYMENT')
+            
+            if counterparty:
+                payee = counterparty
+                # Use first remittance line as narration
+                if txn.remittance_information:
+                    narration = txn.remittance_information[0]
+                elif txn.bank_transaction_code:
+                    narration = txn.bank_transaction_code
+                else:
+                    narration = 'Transaction'
+            elif is_card_payment and txn.remittance_information:
+                # Card payment without counterparty - use remittance as payee (merchant name)
+                payee = txn.remittance_information[0]
+                # Use second line as narration if available, otherwise transaction type
+                if len(txn.remittance_information) > 1:
+                    narration = txn.remittance_information[1]
+                elif txn.bank_transaction_code:
+                    narration = txn.bank_transaction_code
+                else:
+                    narration = 'Transaction'
             else:
-                narration = 'Transaction'
+                # For TRANSFER, EXCHANGE, TOPUP etc. - use bank name as payee
+                payee = txn.bank
+                if txn.remittance_information:
+                    narration = txn.remittance_information[0]
+                elif txn.bank_transaction_code:
+                    narration = txn.bank_transaction_code
+                else:
+                    narration = 'Transaction'
 
         return Transaction(
             meta=None,
