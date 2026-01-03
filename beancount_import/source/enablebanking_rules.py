@@ -1,25 +1,15 @@
 """Bank-specific parsing rules for EnableBanking source.
 
-This module contains configurable rules for extracting payee and narration
-from transaction data for different banks. Each bank can have multiple rules
-that are evaluated in order - the first matching rule is used.
+This module contains configurable rules for extracting payee, narration, and 
+transaction_type from transaction data for different banks. Each bank can have 
+multiple rules that are evaluated in order - the first matching rule is used.
 
-Adding new rules:
-1. Add a new BankRule to the BANK_RULES dict for your bank
-2. Define a condition function that returns True when the rule should apply
-3. Define an extract function that returns ParsedPayeeNarration
+Pattern for mBank transactions:
+- remittance_information[0] = title (used as payee or narration depending on context)
+- remittance_information[1] = transaction type (BLIK, PRZELEW, etc.)
 
-Example:
-    BANK_RULES['mybank'] = [
-        BankRule(
-            name='my_rule',
-            condition=lambda txn: 'KEYWORD' in txn.remittance_information[0],
-            extract=lambda txn: ParsedPayeeNarration(
-                payee=txn.remittance_information[0],
-                narration='My narration'
-            )
-        ),
-    ]
+When counterparty is available: counterparty -> payee, title -> narration
+When counterparty is NOT available: title -> payee, type -> narration
 """
 
 from dataclasses import dataclass
@@ -30,10 +20,17 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class ParsedPayeeNarration:
-    """Result of parsing payee and narration from a transaction."""
+class ParsedTransaction:
+    """Result of parsing transaction data.
+    
+    Attributes:
+        payee: The payee name (merchant, counterparty, etc.)
+        narration: Transaction description/title
+        transaction_type: Optional override for transaction type (from second remittance line)
+    """
     payee: str
     narration: str
+    transaction_type: Optional[str] = None
 
 
 @dataclass
@@ -43,81 +40,110 @@ class BankRule:
     Attributes:
         name: Human-readable name for this rule (for debugging/logging)
         condition: Function that returns True if this rule should be applied
-        extract: Function that extracts payee/narration from the transaction
+        extract: Function that extracts payee/narration/type from the transaction
     """
     name: str
     condition: Callable[['EnableBankingTransaction'], bool]
-    extract: Callable[['EnableBankingTransaction'], ParsedPayeeNarration]
+    extract: Callable[['EnableBankingTransaction'], ParsedTransaction]
 
 
 # =============================================================================
-# BANK RULES REGISTRY
+# HELPER FUNCTIONS
 # =============================================================================
-# Add bank-specific rules here. Rules are evaluated in order - first match wins.
+
+def _has_two_remittance_lines(txn: 'EnableBankingTransaction') -> bool:
+    """Check if transaction has exactly 2 remittance information lines."""
+    return len(txn.remittance_information) == 2
+
+
+def _get_counterparty(txn: 'EnableBankingTransaction') -> Optional[str]:
+    """Get counterparty name based on credit/debit indicator."""
+    if txn.credit_debit_indicator == 'CRDT':
+        return txn.debtor_name
+    return txn.creditor_name
+
+
+def _get_title_and_type(txn: 'EnableBankingTransaction') -> tuple:
+    """Extract title and type from remittance_information.
+    
+    Returns:
+        (title, transaction_type) tuple
+    """
+    if len(txn.remittance_information) >= 2:
+        return txn.remittance_information[0], txn.remittance_information[1]
+    elif len(txn.remittance_information) == 1:
+        return txn.remittance_information[0], None
+    return None, None
+
+
+# =============================================================================
+# GENERIC RULES (apply to all banks)
+# =============================================================================
+
+GENERIC_RULES: List[BankRule] = [
+    # Generic rule: 2 remittance lines with counterparty
+    # counterparty -> payee, first line -> narration, second line -> type
+    BankRule(
+        name='generic_two_lines_with_counterparty',
+        condition=lambda txn: (
+            _has_two_remittance_lines(txn)
+            and _get_counterparty(txn) is not None
+        ),
+        extract=lambda txn: ParsedTransaction(
+            payee=_get_counterparty(txn),
+            narration=txn.remittance_information[0],
+            transaction_type=txn.remittance_information[1]
+        )
+    ),
+    
+    # Generic rule: 2 remittance lines WITHOUT counterparty
+    # first line -> payee, second line -> type (used as narration)
+    BankRule(
+        name='generic_two_lines_no_counterparty',
+        condition=lambda txn: (
+            _has_two_remittance_lines(txn)
+            and _get_counterparty(txn) is None
+        ),
+        extract=lambda txn: ParsedTransaction(
+            payee=txn.remittance_information[0],
+            narration=txn.remittance_information[1],  # type as narration when no title
+            transaction_type=txn.remittance_information[1]
+        )
+    ),
+    
+    # Generic rule: 1 remittance line (fee, etc.)
+    BankRule(
+        name='generic_single_line',
+        condition=lambda txn: len(txn.remittance_information) == 1,
+        extract=lambda txn: ParsedTransaction(
+            payee=_get_counterparty(txn) or txn.bank,
+            narration=txn.remittance_information[0],
+            transaction_type=None
+        )
+    ),
+]
+
+
+# =============================================================================
+# BANK-SPECIFIC RULES
+# =============================================================================
+# These override generic rules for specific banks.
+# Rules are evaluated in order - first match wins.
 
 BANK_RULES: Dict[str, List[BankRule]] = {
     
     # -------------------------------------------------------------------------
-    # mBank
+    # mBank - has specific patterns in remittance_information
     # -------------------------------------------------------------------------
     'mbank': [
-        # BLIK payments: remittance has 2 lines, second contains "BLIK"
-        # Example: ["WWW.ZEN.COM", "BLIK ZAKUP E-COMMERCE"]
-        BankRule(
-            name='blik_payment',
-            condition=lambda txn: (
-                len(txn.remittance_information) == 2
-                and 'BLIK' in txn.remittance_information[1].upper()
-            ),
-            extract=lambda txn: ParsedPayeeNarration(
-                payee=txn.remittance_information[0],
-                narration=txn.remittance_information[1]
-            )
-        ),
-        
-        # Internal transfers: remittance has 2 lines, second contains "PRZELEW WEWNĘTRZNY"
-        # Example: ["DAV/4231225 minus NN", "PRZELEW WEWNĘTRZNY PRZYCHODZĄCY"]
-        BankRule(
-            name='internal_transfer',
-            condition=lambda txn: (
-                len(txn.remittance_information) == 2
-                and 'PRZELEW WEWN' in txn.remittance_information[1].upper()
-            ),
-            extract=lambda txn: ParsedPayeeNarration(
-                payee=txn.debtor_name or txn.creditor_name or txn.bank,
-                narration=txn.remittance_information[0]
-            )
-        ),
-        
-        # External transfers: remittance has 2 lines, second contains "PRZELEW ZEWNĘTRZNY"
-        BankRule(
-            name='external_transfer',
-            condition=lambda txn: (
-                len(txn.remittance_information) == 2
-                and 'PRZELEW ZEWN' in txn.remittance_information[1].upper()
-            ),
-            extract=lambda txn: ParsedPayeeNarration(
-                payee=txn.debtor_name or txn.creditor_name or txn.bank,
-                narration=txn.remittance_information[0]
-            )
-        ),
-        
-        # Fees: single line remittance starting with "OPŁATA"
-        BankRule(
-            name='fee',
-            condition=lambda txn: (
-                len(txn.remittance_information) == 1
-                and txn.remittance_information[0].upper().startswith('OPŁATA')
-            ),
-            extract=lambda txn: ParsedPayeeNarration(
-                payee=txn.bank,
-                narration=txn.remittance_information[0]
-            )
-        ),
+        # No special mbank-only rules needed - generic rules handle all cases
+        # The pattern is:
+        # - [title, type] with counterparty -> counterparty=payee, title=narration, type=transaction_type
+        # - [title, type] without counterparty -> title=payee, type=narration (also transaction_type)
     ],
     
     # -------------------------------------------------------------------------
-    # Revolut (example placeholder - add real rules as needed)
+    # Revolut - uses bank_transaction_code
     # -------------------------------------------------------------------------
     'Revolut': [
         # Card payments with bank_transaction_code
@@ -127,52 +153,64 @@ BANK_RULES: Dict[str, List[BankRule]] = {
                 txn.bank_transaction_code in ('CARD_PAYMENT', 'OTP_PAYMENT')
                 and txn.remittance_information
             ),
-            extract=lambda txn: ParsedPayeeNarration(
+            extract=lambda txn: ParsedTransaction(
                 payee=txn.remittance_information[0],
-                narration=txn.bank_transaction_code or 'Card payment'
+                narration=txn.bank_transaction_code or 'Card payment',
+                transaction_type=txn.bank_transaction_code
             )
         ),
     ],
     
     # -------------------------------------------------------------------------
-    # Pekao (add rules as needed)
+    # Pekao
     # -------------------------------------------------------------------------
     'pekao': [
+        # Add pekao-specific rules if needed
     ],
 }
 
 
-def get_payee_narration(txn: 'EnableBankingTransaction') -> Optional[ParsedPayeeNarration]:
-    """Apply bank-specific rules to extract payee and narration.
+def get_parsed_transaction(txn: 'EnableBankingTransaction') -> Optional[ParsedTransaction]:
+    """Apply bank-specific and generic rules to extract payee, narration, and type.
     
-    Evaluates rules for the transaction's bank in order, returning the result
-    from the first matching rule.
+    First tries bank-specific rules, then falls back to generic rules.
     
     Args:
         txn: The transaction to process
         
     Returns:
-        ParsedPayeeNarration if a rule matched, None otherwise
+        ParsedTransaction if a rule matched, None otherwise
     """
-    # Get rules for this bank (case-insensitive lookup)
+    # Get bank-specific rules (case-insensitive lookup)
     bank_lower = txn.bank.lower()
-    rules = None
+    bank_rules = None
     
-    for bank_name, bank_rules in BANK_RULES.items():
+    for bank_name, rules in BANK_RULES.items():
         if bank_name.lower() == bank_lower:
-            rules = bank_rules
+            bank_rules = rules
             break
     
-    if not rules:
-        return None
+    # Try bank-specific rules first
+    if bank_rules:
+        for rule in bank_rules:
+            try:
+                if rule.condition(txn):
+                    return rule.extract(txn)
+            except (IndexError, AttributeError, TypeError):
+                continue
     
-    # Try each rule in order
-    for rule in rules:
+    # Fall back to generic rules
+    for rule in GENERIC_RULES:
         try:
             if rule.condition(txn):
                 return rule.extract(txn)
         except (IndexError, AttributeError, TypeError):
-            # Rule condition or extract failed - skip to next rule
             continue
     
     return None
+
+
+# Keep backward compatibility
+def get_payee_narration(txn: 'EnableBankingTransaction') -> Optional[ParsedTransaction]:
+    """Backward-compatible alias for get_parsed_transaction."""
+    return get_parsed_transaction(txn)

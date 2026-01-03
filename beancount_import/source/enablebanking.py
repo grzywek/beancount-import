@@ -68,7 +68,7 @@ from beancount.core.amount import Amount
 from . import ImportResult, Source, SourceResults, InvalidSourceReference
 from ..matching import FIXME_ACCOUNT
 from ..journal_editor import JournalEditor
-from .enablebanking_rules import get_payee_narration
+from .enablebanking_rules import get_parsed_transaction
 
 
 # Metadata keys (standardized across all bank sources)
@@ -80,6 +80,7 @@ COUNTERPARTY_IBAN_KEY = 'counterparty_iban'  # Counterparty IBAN (with country p
 COUNTERPARTY_BBAN_KEY = 'counterparty_bban'  # Counterparty BBAN (without country prefix)
 ACCOUNT_IBAN_KEY = 'account_iban'  # Own account IBAN
 TITLE_KEY = 'title'  # Transaction title/remittance
+TRANSACTION_DATE_KEY = 'transaction_date'  # Original transaction date (if different from booking)
 
 
 @dataclass
@@ -584,14 +585,12 @@ class EnableBankingSource(Source):
                 meta[COUNTERPARTY_IBAN_KEY] = counterparty_iban
             else:
                 meta[COUNTERPARTY_BBAN_KEY] = counterparty_iban
-        if txn.bank_transaction_code:
-            meta[TRANSACTION_TYPE_KEY] = txn.bank_transaction_code
-        if txn.remittance_information:
-            # Join multi-line remittance but keep reasonably short
-            remittance = ' | '.join(txn.remittance_information)
-            if len(remittance) > 200:
-                remittance = remittance[:197] + '...'
-            meta[TITLE_KEY] = remittance
+        
+        # Add transaction_date if different from booking_date
+        if txn.transaction_date and txn.transaction_date != txn.booking_date:
+            meta[TRANSACTION_DATE_KEY] = str(txn.transaction_date)
+        
+        # Note: transaction_type and title are set later after rules are applied
 
         # Validate amount before creating Amount
         if not isinstance(txn.amount, Decimal):
@@ -622,46 +621,32 @@ class EnableBankingSource(Source):
         if not isinstance(neg_amount.number, Decimal):
             print(f"[enablebanking] ERROR: neg_amount.number is {type(neg_amount.number)}: {neg_amount}")
 
-        # Determine payee and narration
-        # First try bank-specific rules
-        parsed = get_payee_narration(txn)
+        # Determine payee, narration, and transaction_type
+        # First try bank-specific and generic rules
+        parsed = get_parsed_transaction(txn)
         if parsed:
             payee = parsed.payee
             narration = parsed.narration
+            # Set transaction_type from parsed result or bank_transaction_code
+            if parsed.transaction_type:
+                meta[TRANSACTION_TYPE_KEY] = parsed.transaction_type
+            elif txn.bank_transaction_code:
+                meta[TRANSACTION_TYPE_KEY] = txn.bank_transaction_code
+            # Set title from first remittance line (raw title)
+            if txn.remittance_information:
+                meta[TITLE_KEY] = txn.remittance_information[0]
         else:
-            # Fallback to generic logic
-            # For card payments, the merchant is usually in remittance_information
-            # For transfers, use the counterparty or bank name
-            is_card_payment = txn.bank_transaction_code in ('CARD_PAYMENT', 'OTP_PAYMENT')
-            
-            if counterparty:
-                payee = counterparty
-                # Use first remittance line as narration
-                if txn.remittance_information:
-                    narration = txn.remittance_information[0]
-                elif txn.bank_transaction_code:
-                    narration = txn.bank_transaction_code
-                else:
-                    narration = 'Transaction'
-            elif is_card_payment and txn.remittance_information:
-                # Card payment without counterparty - use remittance as payee (merchant name)
-                payee = txn.remittance_information[0]
-                # Use second line as narration if available, otherwise transaction type
-                if len(txn.remittance_information) > 1:
-                    narration = txn.remittance_information[1]
-                elif txn.bank_transaction_code:
-                    narration = txn.bank_transaction_code
-                else:
-                    narration = 'Transaction'
+            # Fallback to basic logic (should rarely happen with generic rules)
+            payee = counterparty or txn.bank
+            if txn.remittance_information:
+                narration = txn.remittance_information[0]
+                meta[TITLE_KEY] = txn.remittance_information[0]
+            elif txn.bank_transaction_code:
+                narration = txn.bank_transaction_code
             else:
-                # For TRANSFER, EXCHANGE, TOPUP etc. - use bank name as payee
-                payee = txn.bank
-                if txn.remittance_information:
-                    narration = txn.remittance_information[0]
-                elif txn.bank_transaction_code:
-                    narration = txn.bank_transaction_code
-                else:
-                    narration = 'Transaction'
+                narration = 'Transaction'
+            if txn.bank_transaction_code:
+                meta[TRANSACTION_TYPE_KEY] = txn.bank_transaction_code
 
         return Transaction(
             meta=None,
