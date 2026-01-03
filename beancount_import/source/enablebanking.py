@@ -486,6 +486,9 @@ class EnableBankingSource(Source):
             for txn in reversed(txns):
                 if txn.balance_after is not None:
                     target_account = self._get_account_for_id(account_id)
+                    # Skip if account is not mapped
+                    if target_account is None:
+                        break
                     balance_date = txn.booking_date + datetime.timedelta(days=1)
                     
                     results.add_pending_entry(
