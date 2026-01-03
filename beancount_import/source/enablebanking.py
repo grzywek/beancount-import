@@ -554,8 +554,8 @@ class EnableBankingSource(Source):
             if target_account is None:
                 continue
             
-            # Sort by date
-            txns.sort(key=lambda t: t.booking_date)
+            # Sort by date AND entry_reference (for correct order within same day)
+            txns.sort(key=lambda t: (t.booking_date, t.entry_reference))
             
             # Group transactions by year-month
             # Find the last transaction with balance_after for each month
