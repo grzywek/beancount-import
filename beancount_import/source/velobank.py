@@ -104,13 +104,17 @@ from ..matching import FIXME_ACCOUNT
 from ..journal_editor import JournalEditor
 
 
-# Metadata keys
-VELOBANK_STATEMENT_KEY = 'velobank_statement'
-VELOBANK_TYPE_KEY = 'velobank_type'
-VELOBANK_COUNTERPARTY_KEY = 'velobank_counterparty'
-VELOBANK_TITLE_KEY = 'velobank_title'
-VELOBANK_IBAN_KEY = 'velobank_iban'
-VELOBANK_CARD_KEY = 'velobank_card'
+# Metadata keys (standardized across all bank sources)
+SOURCE_REF_KEY = 'source_ref'  # Unique transaction reference
+TRANSACTION_TYPE_KEY = 'transaction_type'  # Transaction type
+COUNTERPARTY_KEY = 'counterparty'  # Counterparty name
+TITLE_KEY = 'title'  # Transaction title
+COUNTERPARTY_IBAN_KEY = 'counterparty_iban'  # Counterparty IBAN (with country prefix)
+COUNTERPARTY_BBAN_KEY = 'counterparty_bban'  # Counterparty BBAN (without country prefix)
+ACCOUNT_IBAN_KEY = 'account_iban'  # Own account IBAN
+CARD_NUMBER_KEY = 'card_number'  # Card number for card operations
+TRANSACTION_DATE_KEY = 'transaction_date'  # Original transaction date
+COUNTERPARTY_ADDRESS_KEY = 'counterparty_address'  # Counterparty address
 
 # Currency
 DEFAULT_CURRENCY = 'PLN'
@@ -173,6 +177,7 @@ class RawTransaction(NamedTuple):
     transaction_type: Optional[str] = None
     counterparty: Optional[str] = None
     counterparty_iban: Optional[str] = None
+    counterparty_address: Optional[str] = None
     title: Optional[str] = None
     card_number: Optional[str] = None
 
@@ -256,8 +261,10 @@ def extract_pdf_text(pdf_path: str) -> str:
         RuntimeError: If pdftotext fails or is not available.
     """
     try:
+        # Use pdftotext WITHOUT -layout for cleaner line-by-line output
+        # This avoids column merging issues and produces predictable structure
         result = subprocess.run(
-            ['pdftotext', '-layout', pdf_path, '-'],
+            ['pdftotext', pdf_path, '-'],
             capture_output=True,
             text=True,
             check=True,
@@ -454,7 +461,7 @@ def _parse_old_format_transactions(
 
             # For card operations, extract merchant name as counterparty
             if not counterparty and description.startswith('Operacja kartą'):
-                counterparty = _extract_card_merchant(description)
+                counterparty, card_location = _extract_card_merchant(description)
 
             # Normalize counterparty - fix PDF line-break artifacts
             # "ZTM Dzial Ko ntroli Bi" -> "ZTM Dzial Kontroli Bi"
@@ -844,8 +851,9 @@ def _parse_new_format_transactions(
 
         # Get counterparty - from parsed data or extract from card operation
         counterparty = raw.get('counterparty')
+        counterparty_address = None
         if not counterparty and raw['description'].startswith('Operacja kartą'):
-            counterparty = _extract_card_merchant(raw['description'])
+            counterparty, counterparty_address = _extract_card_merchant(raw['description'])
         
         # Normalize counterparty name if present
         if counterparty:
@@ -873,8 +881,8 @@ def _parse_new_format_transactions(
     return transactions
 
 
-def _extract_card_merchant(description: str) -> Optional[str]:
-    """Extract merchant name from card operation description.
+def _extract_card_merchant(description: str) -> Tuple[Optional[str], Optional[str]]:
+    """Extract merchant name and location from card operation description.
 
     Args:
         description: Transaction description like
@@ -882,18 +890,20 @@ def _extract_card_merchant(description: str) -> Optional[str]:
             or "Operacja kartą ... w LIDL GEN. ZIET KA, Myslowice,"
 
     Returns:
-        Merchant name or None if not a card operation.
+        Tuple of (merchant_name, location) or (None, None) if not a card operation.
     """
-    # Find the part after "w " and extract merchant (first segment before comma)
-    # Pattern handles various formats:
-    # - "... w MERCHANT, CITY, COUNTRY"
-    # - "... w MERCHANT, CITY," (trailing comma)
-    # - "... w MERCHANT, CITY"
-    match = re.search(r'\bw\s+([^,]+)', description)
+    # Find the part after "w " - format is "MERCHANT, CITY, COUNTRY"
+    match = re.search(r'\bw\s+(.+?)(?:\s*$)', description)
     if match:
-        return match.group(1).strip()
+        full_text = match.group(1).strip()
+        # Split by comma - first is merchant, rest is location
+        parts = [p.strip() for p in full_text.split(',') if p.strip()]
+        if parts:
+            merchant = parts[0]
+            location = ', '.join(parts[1:]) if len(parts) > 1 else None
+            return merchant, location
     
-    return None
+    return None, None
 
 
 def _extract_card_number(description: str) -> Optional[str]:
@@ -953,6 +963,9 @@ def _extract_transaction_type(description: str) -> str:
 def parse_pdf_statement(pdf_path: str) -> StatementInfo:
     """Parse a VeloBank PDF statement.
 
+    Uses pdftotext without -layout flag for cleaner line-by-line output.
+    This unified parser works for all statement formats (2018-2025+).
+
     Args:
         pdf_path: Path to the PDF file.
 
@@ -960,12 +973,397 @@ def parse_pdf_statement(pdf_path: str) -> StatementInfo:
         StatementInfo containing all parsed data.
     """
     text = extract_pdf_text(pdf_path)
-    format_type = detect_format(text)
+    lines = [line.strip() for line in text.split('\n')]
+    filename = os.path.basename(pdf_path)
 
-    if format_type == 'new':
-        return parse_new_format(text, pdf_path)
-    else:
-        return parse_old_format(text, pdf_path)
+    # Extract header info
+    statement_id = ''
+    account_iban = ''
+    period_start = None
+    period_end = None
+    opening_balance = None
+
+    # Patterns for header extraction
+    # Old format: "Wyciąg z rachunku 2/2018 za okres 2018.04.01 - 2018.04.30"
+    # New format: "Wyciąg nr 11/2025" then "Wyciąg za okres od 2025.11.01 do 2025.11.30"
+    stmt_pattern = re.compile(r'Wyciąg(?:\s+z\s+rachunku)?(?:\s+nr)?\s+(\d+/\d{4})')
+    period_pattern_old = re.compile(r'za okres\s+(\d{4}\.\d{2}\.\d{2})\s*-\s*(\d{4}\.\d{2}\.\d{2})')
+    period_pattern_new = re.compile(r'za okres od\s+(\d{4}\.\d{2}\.\d{2})\s+do\s+(\d{4}\.\d{2}\.\d{2})')
+    
+    # IBAN patterns - try multiple formats
+    iban_pattern_full = re.compile(r'IBAN[:\s]*(PL[\s\d]+)')
+    iban_pattern_num = re.compile(r'NUMER RACHUNKU|Numer rachunku')
+
+    for i, line in enumerate(lines):
+        # Statement ID
+        if not statement_id:
+            match = stmt_pattern.search(line)
+            if match:
+                statement_id = match.group(1)
+        
+        # Period (old format)
+        if not period_start:
+            match = period_pattern_old.search(line)
+            if match:
+                period_start = parse_polish_date(match.group(1))
+                period_end = parse_polish_date(match.group(2))
+        
+        # Period (new format)
+        if not period_start:
+            match = period_pattern_new.search(line)
+            if match:
+                period_start = parse_polish_date(match.group(1))
+                period_end = parse_polish_date(match.group(2))
+        
+        # IBAN (with PL prefix already)
+        if not account_iban:
+            match = iban_pattern_full.search(line)
+            if match:
+                account_iban = re.sub(r'\s+', '', match.group(1))
+        
+        # IBAN (numeric only from NUMER RACHUNKU, add PL prefix)
+        if not account_iban and i < len(lines) - 3:
+            if iban_pattern_num.search(line):
+                # Look in next few lines for account number (may have empty line first)
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    check_line = lines[j].strip()
+                    if re.match(r'^[\d\s]{20,}$', check_line):
+                        account_iban = 'PL' + re.sub(r'\s+', '', check_line)
+                        break
+        
+        # Opening balance
+        if opening_balance is None and 'Saldo początkowe' in line:
+            # Look for amount in next few lines
+            for j in range(i + 1, min(i + 4, len(lines))):
+                try:
+                    opening_balance = parse_polish_amount(lines[j])
+                    break
+                except:
+                    continue
+
+    # Parse transactions using state machine
+    transactions = _parse_transactions_nolayout(lines, statement_id, filename)
+
+    return StatementInfo(
+        filename=filename,
+        statement_id=statement_id,
+        account_iban=account_iban,
+        period_start=period_start,
+        period_end=period_end,
+        opening_balance=opening_balance,
+        transactions=transactions,
+    )
+
+
+# Parser states
+STATE_LOOKING_FOR_DATE = 0
+STATE_LOOKING_FOR_TXN_DATE = 1
+STATE_COLLECTING_DESCRIPTION = 2
+STATE_LOOKING_FOR_BALANCE = 3
+
+
+def _is_date_line(line: str) -> bool:
+    """Check if line contains only a date in YYYY.MM.DD format."""
+    return bool(re.match(r'^\d{4}\.\d{2}\.\d{2}$', line))
+
+
+def _is_amount_line(line: str) -> bool:
+    """Check if line contains only an amount (like -1 234,56 or 56,78)."""
+    return bool(re.match(r'^-?[\d\s]+,\d{2}$', line))
+
+
+def _parse_transactions_nolayout(
+    lines: List[str],
+    statement_id: str,
+    filename: str,
+) -> List[RawTransaction]:
+    """Parse transactions from non-layout pdftotext output.
+
+    Structure:
+        [booking_date YYYY.MM.DD]
+        [txn_date YYYY.MM.DD]
+        [description lines...]
+        [amount]
+        [balance]
+
+    Args:
+        lines: List of text lines.
+        statement_id: Statement identifier.
+        filename: PDF filename.
+
+    Returns:
+        List of parsed transactions.
+    """
+    transactions = []
+    state = STATE_LOOKING_FOR_DATE
+    txn_number = 0
+
+    booking_date = None
+    txn_date = None
+    description_lines = []
+    amount = None
+
+    for line_num, line in enumerate(lines):
+        if not line:
+            continue
+
+        # Skip header/footer content
+        if any(skip in line for skip in [
+            'DATA', 'TRANSAKCJI', 'KSIĘGOWANIA', 'KWOTA', 'SALDO',
+            'Obroty WN', 'Obroty MA', 'Saldo końcowe',
+            'Data i godzina:', 'Strona', 'VeloBank S.A.',
+            'Kod BIC', 'RACHUNEK PROWADZONY', 'NUMER RACHUNKU',
+            'OPROCENTOWANIE', 'Wyciąg', 'Pakiet:', 'Waluta rachunku',
+            'Numer ewidencyjny', 'Bankowym Funduszu Gwarancyjnym',
+            'www.bfg.pl', 'art.7 ustawy', 'Dokument wygenerowany',
+        ]):
+            continue
+
+        if state == STATE_LOOKING_FOR_DATE:
+            if _is_date_line(line):
+                # First date in PDF is transaction date
+                txn_date = parse_polish_date(line)
+                state = STATE_LOOKING_FOR_TXN_DATE
+
+        elif state == STATE_LOOKING_FOR_TXN_DATE:
+            if _is_date_line(line):
+                # Second date in PDF is booking date
+                booking_date = parse_polish_date(line)
+                description_lines = []
+                state = STATE_COLLECTING_DESCRIPTION
+            elif not _is_amount_line(line):
+                # Might be continuation of previous description, reset
+                state = STATE_LOOKING_FOR_DATE
+
+        elif state == STATE_COLLECTING_DESCRIPTION:
+            if _is_amount_line(line):
+                amount = parse_polish_amount(line)
+                state = STATE_LOOKING_FOR_BALANCE
+            elif not _is_date_line(line):
+                description_lines.append(line)
+
+        elif state == STATE_LOOKING_FOR_BALANCE:
+            if _is_amount_line(line):
+                balance = parse_polish_amount(line)
+                
+                # Build transaction - parse lines individually
+                txn_number += 1
+                full_description = ' '.join(description_lines)
+                
+                # Extract metadata from individual lines (preserving structure)
+                txn_type = None
+                counterparty = None
+                counterparty_iban = None
+                counterparty_address = None
+                title = None
+                card_number = None
+                
+                # Define keywords that start new sections
+                keywords = ['Z rachunku:', 'Na rachunek:', 'Prowadzon', 'Nadawca:', 'Odbiorca:', 'Tytułem:']
+                
+                # Build sections - each section is (keyword, content_lines)
+                sections = []
+                current_section = None
+                current_lines = []
+                
+                for i, desc_line in enumerate(description_lines):
+                    # First line is always transaction type
+                    if i == 0:
+                        txn_type = _extract_transaction_type(desc_line)
+                        # For card operations, mark section and include first line
+                        if 'Operacja kartą' in desc_line:
+                            card_number = _extract_card_number(desc_line)
+                            current_section = 'CARD'
+                            current_lines = [desc_line]  # Include first line for merchant extraction
+                        continue
+                    
+                    # Check if line starts a new section
+                    found_keyword = None
+                    for kw in keywords:
+                        if kw.lower() in desc_line.lower():
+                            found_keyword = kw
+                            break
+                    
+                    if found_keyword:
+                        # Save previous section
+                        if current_section:
+                            sections.append((current_section, current_lines))
+                        # Start new section
+                        current_section = found_keyword
+                        current_lines = [desc_line]
+                    else:
+                        # Continuation of current section
+                        current_lines.append(desc_line)
+                
+                # Save last section
+                if current_section and current_lines:
+                    sections.append((current_section, current_lines))
+                
+                # Process sections
+                for section_kw, section_lines in sections:
+                    section_text = ' '.join(section_lines)
+                    
+                    # IBAN
+                    if 'rachunek' in section_kw.lower():
+                        iban_match = re.search(r'(\d[\d\s]{15,})', section_text)
+                        if iban_match:
+                            counterparty_iban = re.sub(r'\s+', '', iban_match.group(1))[:26]
+                    
+                    # Prowadzonego na rzecz - comma separated
+                    elif 'prowadzon' in section_kw.lower():
+                        pnr_match = re.search(r'Prowadzon(?:y|ego|e) na rzecz:\s*(.+)', section_text, re.IGNORECASE)
+                        if pnr_match:
+                            full_text = pnr_match.group(1).strip()
+                            # First comma separates name from address
+                            parts = full_text.split(',', 1)
+                            counterparty = parts[0].strip()
+                            if len(parts) > 1:
+                                counterparty_address = parts[1].strip().lstrip(',').strip()
+                    
+                    # Nadawca/Odbiorca - first line is name, rest is address
+                    elif section_kw.lower() in ['nadawca:', 'odbiorca:']:
+                        on_match = re.search(r'(?:Nadawca|Odbiorca):\s*(.+)', section_lines[0], re.IGNORECASE)
+                        if on_match:
+                            counterparty = on_match.group(1).strip()
+                        # Remaining lines are address
+                        if len(section_lines) > 1:
+                            counterparty_address = ' '.join(line.strip() for line in section_lines[1:])
+                    
+                    # Tytułem
+                    elif 'tytułem' in section_kw.lower():
+                        title_match = re.search(r'Tytułem:\s*(.+)', section_text, re.IGNORECASE)
+                        if title_match:
+                            title = title_match.group(1).strip()
+                    
+                    # Card operation - extract merchant and location from all lines
+                    elif section_kw == 'CARD':
+                        # Combine all lines (first has merchant, rest is location continuation)
+                        combined_text = ' '.join(line.strip() for line in section_lines)
+                        counterparty, counterparty_address = _extract_card_merchant(combined_text)
+
+                transactions.append(RawTransaction(
+                    transaction_date=txn_date,
+                    booking_date=booking_date,
+                    description=full_description,
+                    amount=amount,
+                    balance_after=balance,
+                    statement_id=statement_id,
+                    line_number=txn_number,
+                    filename=filename,
+                    transaction_type=txn_type,
+                    counterparty=counterparty,
+                    counterparty_iban=counterparty_iban,
+                    counterparty_address=counterparty_address,
+                    title=title,
+                    card_number=card_number,
+                ))
+                
+                # Reset for next transaction
+                state = STATE_LOOKING_FOR_DATE
+            elif _is_date_line(line):
+                # New transaction started, save current as incomplete
+                state = STATE_LOOKING_FOR_TXN_DATE
+                booking_date = parse_polish_date(line)
+
+    return transactions
+
+
+def _extract_counterparty_info(description: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extract counterparty name, IBAN, and address from description.
+
+    Old format (2018-2023) patterns:
+    - "Na rachunek: XXXXXX Prowadzony na rzecz: NAME, ADDRESS Tytułem: TITLE"
+    - "Z rachunku: XXXXXX Prowadzonego na rzecz: NAME, ADDRESS Tytułem: TITLE"
+    
+    New format (2024+) patterns:
+    - "Na rachunek: XXXXXX Odbiorca: NAME ul. ADDRESS Tytułem: TITLE"
+    - "Z rachunku: XXXXXX Nadawca: NAME ul. ADDRESS Tytułem: TITLE"
+
+    Args:
+        description: Full transaction description.
+
+    Returns:
+        Tuple of (counterparty_name, counterparty_iban, counterparty_address).
+    """
+    counterparty = None
+    counterparty_iban = None
+    counterparty_address = None
+
+    # Extract IBAN - look for account number (BBAN) after "Z rachunku:" or "Na rachunek:"
+    # PDF contains BBAN (26 digits), we convert to IBAN by adding "PL" prefix
+    iban_match = re.search(
+        r'(?:Z rachunku|Na rachunek):\s*(\d[\d\s]{15,})',
+        description,
+        re.IGNORECASE
+    )
+    if iban_match:
+        bban = re.sub(r'\s+', '', iban_match.group(1))
+        # Take only first 26 digits (BBAN) and convert to IBAN
+        if len(bban) > 26:
+            bban = bban[:26]
+        counterparty_iban = 'PL' + bban
+
+    # Extract counterparty name and address
+    # Strategy: find the counterparty section, then split name from address
+    
+    # Pattern to extract full counterparty section (name + address) before Tytułem:
+    section_patterns = [
+        r'Prowadzon(?:y|ego|e) na rzecz:\s*(.+?)(?:\s+Tytułem:|\s*$)',
+        r'Nadawca:\s*(.+?)(?:\s+Tytułem:|\s*$)',
+        r'Odbiorca:\s*(.+?)(?:\s+Tytułem:|\s*$)',
+    ]
+    
+    for pattern in section_patterns:
+        match = re.search(pattern, description, re.IGNORECASE)
+        if match:
+            full_section = match.group(1).strip()
+            
+            # Split by address indicators (ul., UL, AL, aleja, etc.)
+            addr_match = re.search(r'^(.+?)\s+([Uu][Ll]\.?\s+.+|[Aa][Ll]\.?\s+.+|[Aa]leja\s+.+)$', full_section)
+            if addr_match:
+                counterparty = addr_match.group(1).strip().rstrip(',')
+                counterparty_address = addr_match.group(2).strip()
+            else:
+                # Try comma split - name before first comma, rest is address
+                parts = full_section.split(',', 1)
+                counterparty = parts[0].strip()
+                if len(parts) > 1:
+                    counterparty_address = parts[1].strip()
+            
+            # Skip if counterparty looks like it captured Tytułem
+            if counterparty and counterparty.startswith('Tytułem'):
+                counterparty = None
+                counterparty_address = None
+                continue
+            
+            if counterparty:
+                break
+
+    # For card operations, extract merchant as counterparty if not found
+    if not counterparty and 'Operacja kartą' in description:
+        counterparty, counterparty_address = _extract_card_merchant(description)
+
+    return counterparty, counterparty_iban, counterparty_address
+
+
+def _extract_title(description: str) -> Optional[str]:
+    """Extract transaction title from description.
+
+    Pattern: "Tytułem: <title>"
+    
+    Both old and new formats use "Tytułem:" keyword.
+
+    Args:
+        description: Full transaction description.
+
+    Returns:
+        Transaction title or None.
+    """
+    match = re.search(r'Tytułem:\s*(.+)', description, re.IGNORECASE)
+    if match:
+        title = match.group(1).strip()
+        return title if title else None
+    return None
 
 
 def get_velobank_account_map(accounts: Dict[str, Open]) -> Dict[str, str]:
@@ -980,7 +1378,7 @@ def get_velobank_account_map(accounts: Dict[str, Open]) -> Dict[str, str]:
     result = {}
     for entry in accounts.values():
         if entry.meta:
-            iban = entry.meta.get(VELOBANK_IBAN_KEY)
+            iban = entry.meta.get(COUNTERPARTY_BBAN_KEY)
             if iban:
                 result[iban] = entry.account
     return result
@@ -1100,9 +1498,9 @@ class VelobankSource(Source):
             if value is not None:
                 result[key] = value
 
-        maybe_add_key(VELOBANK_TYPE_KEY)
-        maybe_add_key(VELOBANK_COUNTERPARTY_KEY)
-        maybe_add_key(VELOBANK_TITLE_KEY)
+        maybe_add_key(TRANSACTION_TYPE_KEY)
+        maybe_add_key(COUNTERPARTY_KEY)
+        maybe_add_key(TITLE_KEY)
 
         return result
 
@@ -1119,7 +1517,7 @@ class VelobankSource(Source):
         """
         if posting.meta is None:
             return False
-        return VELOBANK_STATEMENT_KEY in posting.meta
+        return SOURCE_REF_KEY in posting.meta
 
     def _get_account_for_iban(self, iban: str) -> str:
         """Get the Beancount account for a given IBAN.
@@ -1167,7 +1565,7 @@ class VelobankSource(Source):
                 # Check if posting belongs to any of our accounts
                 if posting.account not in all_accounts:
                     continue
-                stmt_ref = posting.meta.get(VELOBANK_STATEMENT_KEY)
+                stmt_ref = posting.meta.get(SOURCE_REF_KEY)
                 if stmt_ref is not None:
                     matched_ids.setdefault(stmt_ref, []).append((entry, posting))
 
@@ -1244,25 +1642,31 @@ class VelobankSource(Source):
 
         # Build metadata
         meta = collections.OrderedDict([
-            (VELOBANK_STATEMENT_KEY, txn_id),
-            (VELOBANK_TYPE_KEY, txn.transaction_type or txn.description),
+            (SOURCE_REF_KEY, txn_id),
+            (TRANSACTION_TYPE_KEY, txn.transaction_type or txn.description),
         ])
 
         if txn.counterparty:
-            meta[VELOBANK_COUNTERPARTY_KEY] = txn.counterparty
+            meta[COUNTERPARTY_KEY] = txn.counterparty
+        if txn.counterparty_address:
+            meta[COUNTERPARTY_ADDRESS_KEY] = txn.counterparty_address
         if txn.counterparty_iban:
-            meta[VELOBANK_IBAN_KEY] = txn.counterparty_iban
+            # VeloBank uses BBAN (without PL prefix)
+            meta[COUNTERPARTY_BBAN_KEY] = txn.counterparty_iban
         if txn.title:
-            meta[VELOBANK_TITLE_KEY] = txn.title
+            meta[TITLE_KEY] = txn.title
         if txn.card_number:
-            meta[VELOBANK_CARD_KEY] = txn.card_number
+            meta[CARD_NUMBER_KEY] = txn.card_number
+        # Add transaction date if different from booking date
+        if txn.transaction_date != txn.booking_date:
+            meta[TRANSACTION_DATE_KEY] = str(txn.transaction_date)
 
         amount = Amount(txn.amount, DEFAULT_CURRENCY)
 
         # Determine payee and narration (with English translation for type)
         payee = txn.counterparty or 'VeloBank'
         
-        # For narration: use title if available, otherwise translate the type
+        # For narration: use title if available, otherwise use translated type
         if txn.title:
             narration = txn.title
         else:

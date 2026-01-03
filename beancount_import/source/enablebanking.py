@@ -255,7 +255,7 @@ class EnableBankingSource(Source):
 
     def __init__(
         self,
-        data_directory: str,
+        directory: str,
         account_map: Optional[Dict[str, str]] = None,
         default_account: Optional[str] = None,
         banks: Optional[List[str]] = None,
@@ -264,7 +264,7 @@ class EnableBankingSource(Source):
         """Initialize the EnableBanking source.
 
         Args:
-            data_directory: Directory containing bank subdirectories with JSON files.
+            directory: Directory containing bank subdirectories with JSON files.
             account_map: Dictionary mapping account_id (IBAN_CURRENCY) to Beancount account.
             default_account: Fallback account when account not in account_map.
             banks: Optional list of bank subdirectory names to import (e.g., ['mbank', 'revolut']).
@@ -272,7 +272,7 @@ class EnableBankingSource(Source):
             **kwargs: Additional arguments passed to Source.
         """
         super().__init__(**kwargs)
-        self.data_directory = data_directory
+        self.data_directory = directory
         
         self.account_map: Dict[str, str] = account_map or {}
         self.default_account = default_account

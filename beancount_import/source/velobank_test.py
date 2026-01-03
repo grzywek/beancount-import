@@ -98,7 +98,6 @@ class TestVelobankSource:
                 log_status=lambda x: None,
             )
             assert source.name == 'velobank'
-            assert source.assets_account == 'Assets:Bank:VeloBank'
 
     def test_is_posting_cleared(self):
         """Test posting cleared detection."""
@@ -114,14 +113,14 @@ class TestVelobankSource:
                 log_status=lambda x: None,
             )
 
-            # Posting with velobank_statement is cleared
+            # Posting with source_ref is cleared
             cleared_posting = Posting(
                 account='Assets:Bank:VeloBank',
                 units=Amount(D('100'), 'PLN'),
                 cost=None,
                 price=None,
                 flag=None,
-                meta={'velobank_statement': '1/2024:1:abc123'},
+                meta={'source_ref': '1/2024:1:abc123'},
             )
             assert source.is_posting_cleared(cleared_posting) is True
 
