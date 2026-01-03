@@ -570,7 +570,34 @@ class EnableBankingSource(Source):
                 remittance = remittance[:197] + '...'
             meta[TITLE_KEY] = remittance
 
-        amount = Amount(txn.amount, txn.currency)
+        # Validate amount before creating Amount
+        if not isinstance(txn.amount, Decimal):
+            print(f"[enablebanking] ERROR in _make_transaction: txn.amount is {type(txn.amount)}, not Decimal: {txn.amount}")
+            print(f"[enablebanking] Transaction: {txn.entry_reference} from {txn.bank}")
+            # Try to convert to Decimal
+            try:
+                txn_amount = D(str(txn.amount))
+            except Exception as e:
+                print(f"[enablebanking] Cannot convert: {e}")
+                raise
+        else:
+            txn_amount = txn.amount
+        
+        # Ensure currency is a string
+        if not isinstance(txn.currency, str):
+            print(f"[enablebanking] ERROR: txn.currency is {type(txn.currency)}, not str: {txn.currency}")
+            txn_currency = str(txn.currency)
+        else:
+            txn_currency = txn.currency
+
+        amount = Amount(txn_amount, txn_currency)
+        neg_amount = Amount(-txn_amount, txn_currency)
+        
+        # Additional validation
+        if not isinstance(amount.number, Decimal):
+            print(f"[enablebanking] ERROR: amount.number is {type(amount.number)}: {amount}")
+        if not isinstance(neg_amount.number, Decimal):
+            print(f"[enablebanking] ERROR: neg_amount.number is {type(neg_amount.number)}: {neg_amount}")
 
         # Determine payee and narration
         # For card payments, the merchant is usually in remittance_information
@@ -625,7 +652,7 @@ class EnableBankingSource(Source):
                 ),
                 Posting(
                     account=FIXME_ACCOUNT,
-                    units=Amount(-txn.amount, txn.currency),
+                    units=neg_amount,
                     cost=None,
                     price=None,
                     flag=None,
