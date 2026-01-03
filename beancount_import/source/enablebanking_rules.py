@@ -124,13 +124,14 @@ GENERIC_RULES: List[BankRule] = [
     ),
     
     # Generic rule: 1 remittance line (fee, etc.)
+    # For single-line transactions (like mBank fees), the line is both narration AND type
     BankRule(
         name='generic_single_line',
         condition=lambda txn: len(txn.remittance_information) == 1,
         extract=lambda txn: ParsedTransaction(
             payee=_get_counterparty(txn) or txn.bank,
             narration=txn.remittance_information[0],
-            transaction_type=None
+            transaction_type=txn.remittance_information[0]  # Single line is the type
         )
     ),
     
