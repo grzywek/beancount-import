@@ -76,11 +76,40 @@ SOURCE_REF_KEY = 'source_ref'  # Unique transaction reference
 SOURCE_BANK_KEY = 'source_bank'  # Bank/ASPSP name
 TRANSACTION_TYPE_KEY = 'transaction_type'  # Transaction code (CARD_PAYMENT, TRANSFER, etc.)
 COUNTERPARTY_KEY = 'counterparty'  # Counterparty name
+COUNTERPARTY_ADDRESS_KEY = 'counterparty_address'  # Counterparty address (extracted from name)
 COUNTERPARTY_IBAN_KEY = 'counterparty_iban'  # Counterparty IBAN (with country prefix)
 COUNTERPARTY_BBAN_KEY = 'counterparty_bban'  # Counterparty BBAN (without country prefix)
 ACCOUNT_IBAN_KEY = 'account_iban'  # Own account IBAN
 TITLE_KEY = 'title'  # Transaction title/remittance
 TRANSACTION_DATE_KEY = 'transaction_date'  # Original transaction date (if different from booking)
+
+
+def _split_counterparty_address(name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Split counterparty name from address.
+    
+    Handles two patterns:
+    1. Comma separator (mBank): "AUTOPAY SA, UL. POWSTAŃCÓW WARSZAWY 6, 81-718 SOPOT"
+       -> ("AUTOPAY SA", "UL. POWSTAŃCÓW WARSZAWY 6, 81-718 SOPOT")
+    2. Multiple spaces (Pekao): "KAUFLAND               MYSLOWICE"
+       -> ("KAUFLAND", "MYSLOWICE")
+    
+    Returns: (name, address) tuple. Address is None if no separator found.
+    """
+    import re
+    if not name:
+        return None, None
+    
+    # First try comma separator
+    if ',' in name:
+        parts = name.split(',', 1)
+        return parts[0].strip(), parts[1].strip()
+    
+    # Try multiple spaces (3 or more) as separator
+    parts = re.split(r'\s{3,}', name, maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    
+    return name, None
 
 
 @dataclass
@@ -108,8 +137,10 @@ class EnableBankingTransaction:
     # Counterparty info
     creditor_name: Optional[str]
     creditor_iban: Optional[str]
+    creditor_address: Optional[str]  # From postal_address.address_line
     debtor_name: Optional[str]
     debtor_iban: Optional[str]
+    debtor_address: Optional[str]  # From postal_address.address_line
     # Description
     remittance_information: List[str]
     # Transaction code
@@ -156,6 +187,29 @@ def _extract_account_iban(account_id_obj: Optional[dict]) -> Optional[str]:
     return None
 
 
+def _extract_address(postal_address: Optional[dict]) -> Optional[str]:
+    """Extract address from postal_address object.
+    
+    Joins address_line entries into a single string, cleaning up extra whitespace.
+    Example input: {"address_line": ["UL. KS. JANA NYGI 1A/15", "41-400    MYSŁOWICE           PL"]}
+    Example output: "UL. KS. JANA NYGI 1A/15, 41-400 MYSŁOWICE PL"
+    """
+    if not postal_address:
+        return None
+    address_lines = postal_address.get('address_line') or []
+    if not address_lines:
+        return None
+    # Clean up each line and join with comma
+    cleaned = []
+    for line in address_lines:
+        if line:
+            # Normalize whitespace
+            cleaned_line = ' '.join(line.split())
+            if cleaned_line:
+                cleaned.append(cleaned_line)
+    return ', '.join(cleaned) if cleaned else None
+
+
 def _parse_transaction(txn_data: dict, account_id: str, bank: str) -> Optional[EnableBankingTransaction]:
     """Parse a single transaction from JSON data."""
     entry_ref = txn_data.get('entry_reference')
@@ -198,12 +252,14 @@ def _parse_transaction(txn_data: dict, account_id: str, bank: str) -> Optional[E
     creditor_name = creditor.get('name')
     creditor_acc = txn_data.get('creditor_account')
     creditor_iban = _extract_account_iban(creditor_acc) if creditor_acc else None
+    creditor_address = _extract_address(creditor.get('postal_address'))
     
     # Debtor info
     debtor = txn_data.get('debtor') or {}
     debtor_name = debtor.get('name')
     debtor_acc = txn_data.get('debtor_account')
     debtor_iban = _extract_account_iban(debtor_acc) if debtor_acc else None
+    debtor_address = _extract_address(debtor.get('postal_address'))
     
     # Remittance information
     remittance = txn_data.get('remittance_information') or []
@@ -233,8 +289,10 @@ def _parse_transaction(txn_data: dict, account_id: str, bank: str) -> Optional[E
         status=txn_data.get('status', 'BOOK'),
         creditor_name=creditor_name,
         creditor_iban=creditor_iban,
+        creditor_address=creditor_address,
         debtor_name=debtor_name,
         debtor_iban=debtor_iban,
+        debtor_address=debtor_address,
         remittance_information=remittance,
         bank_transaction_code=bank_txn_code,
         balance_after=balance_after,
@@ -567,18 +625,25 @@ class EnableBankingSource(Source):
 
         # Determine counterparty based on credit/debit
         counterparty = None
+        counterparty_address = None
         counterparty_iban = None
         if txn.credit_debit_indicator == 'CRDT':
             # Incoming - debtor is the counterparty
-            counterparty = txn.debtor_name
+            counterparty, addr_from_name = _split_counterparty_address(txn.debtor_name)
             counterparty_iban = txn.debtor_iban
+            # Prefer postal_address over address embedded in name
+            counterparty_address = txn.debtor_address or addr_from_name
         else:
             # Outgoing - creditor is the counterparty
-            counterparty = txn.creditor_name
+            counterparty, addr_from_name = _split_counterparty_address(txn.creditor_name)
             counterparty_iban = txn.creditor_iban
+            # Prefer postal_address over address embedded in name
+            counterparty_address = txn.creditor_address or addr_from_name
 
         if counterparty:
             meta[COUNTERPARTY_KEY] = counterparty
+        if counterparty_address:
+            meta[COUNTERPARTY_ADDRESS_KEY] = counterparty_address
         if counterparty_iban:
             # Use IBAN or BBAN key based on whether it has country prefix
             if counterparty_iban.startswith(('PL', 'LT', 'DE', 'GB', 'FR')):
@@ -586,9 +651,9 @@ class EnableBankingSource(Source):
             else:
                 meta[COUNTERPARTY_BBAN_KEY] = counterparty_iban
         
-        # Add transaction_date if different from booking_date
+        # Add transaction_date if different from booking_date (as proper date object for matching)
         if txn.transaction_date and txn.transaction_date != txn.booking_date:
-            meta[TRANSACTION_DATE_KEY] = str(txn.transaction_date)
+            meta[TRANSACTION_DATE_KEY] = txn.transaction_date  # datetime.date, not string!
         
         # Note: transaction_type and title are set later after rules are applied
 
@@ -632,9 +697,21 @@ class EnableBankingSource(Source):
                 meta[TRANSACTION_TYPE_KEY] = parsed.transaction_type
             elif txn.bank_transaction_code:
                 meta[TRANSACTION_TYPE_KEY] = txn.bank_transaction_code
-            # Set title from first remittance line (raw title)
-            if txn.remittance_information:
-                meta[TITLE_KEY] = txn.remittance_information[0]
+            
+            # Handle metadata based on where payee comes from:
+            # - If counterparty from JSON exists: it's already in metadata, title = first remittance line
+            # - If payee extracted from remittance[0] (no JSON counterparty): 
+            #   that's the counterparty, no separate title
+            if counterparty:
+                # Counterparty from JSON - first remittance line is the title/description
+                if txn.remittance_information:
+                    meta[TITLE_KEY] = txn.remittance_information[0]
+            else:
+                # No counterparty from JSON - payee was extracted from remittance[0]
+                # Store it as counterparty metadata (it's the merchant/payee)
+                if payee and payee != txn.bank:
+                    meta[COUNTERPARTY_KEY] = payee
+                # No title in this case (the "title" IS the counterparty)
         else:
             # Fallback to basic logic (should rarely happen with generic rules)
             payee = counterparty or txn.bank

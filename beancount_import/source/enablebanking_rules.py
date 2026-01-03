@@ -57,10 +57,22 @@ def _has_two_remittance_lines(txn: 'EnableBankingTransaction') -> bool:
 
 
 def _get_counterparty(txn: 'EnableBankingTransaction') -> Optional[str]:
-    """Get counterparty name based on credit/debit indicator."""
-    if txn.credit_debit_indicator == 'CRDT':
-        return txn.debtor_name
-    return txn.creditor_name
+    """Get counterparty name based on credit/debit indicator.
+    
+    Also splits off address if embedded in name (comma or multiple spaces).
+    """
+    import re
+    name = txn.debtor_name if txn.credit_debit_indicator == 'CRDT' else txn.creditor_name
+    if not name:
+        return None
+    # Split off address (comma separator or 3+ spaces)
+    if ',' in name:
+        name = name.split(',', 1)[0].strip()
+    else:
+        parts = re.split(r'\s{3,}', name, maxsplit=1)
+        if len(parts) >= 1:
+            name = parts[0].strip()
+    return name or None
 
 
 def _get_title_and_type(txn: 'EnableBankingTransaction') -> tuple:
@@ -119,6 +131,20 @@ GENERIC_RULES: List[BankRule] = [
             payee=_get_counterparty(txn) or txn.bank,
             narration=txn.remittance_information[0],
             transaction_type=None
+        )
+    ),
+    
+    # Generic rule: counterparty exists but no remittance (Pekao card payments)
+    BankRule(
+        name='generic_counterparty_only',
+        condition=lambda txn: (
+            len(txn.remittance_information) == 0
+            and _get_counterparty(txn) is not None
+        ),
+        extract=lambda txn: ParsedTransaction(
+            payee=_get_counterparty(txn),
+            narration=txn.bank_transaction_code or 'Transaction',
+            transaction_type=txn.bank_transaction_code
         )
     ),
 ]
