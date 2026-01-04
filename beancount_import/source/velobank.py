@@ -1176,6 +1176,13 @@ def _parse_transactions_nolayout(
                             card_number = _extract_card_number(desc_line)
                             current_section = 'CARD'
                             current_lines = [desc_line]  # Include first line for merchant extraction
+                        # Check if first line also contains Z rachunku: or Na rachunek:
+                        elif 'Z rachunku:' in desc_line or 'z rachunku:' in desc_line.lower():
+                            current_section = 'Z rachunku:'
+                            current_lines = [desc_line]
+                        elif 'Na rachunek:' in desc_line or 'na rachunek:' in desc_line.lower():
+                            current_section = 'Na rachunek:'
+                            current_lines = [desc_line]
                         continue
                     
                     # Check if line starts a new section
@@ -1204,11 +1211,20 @@ def _parse_transactions_nolayout(
                 for section_kw, section_lines in sections:
                     section_text = ' '.join(section_lines)
                     
-                    # IBAN
-                    if 'rachunek' in section_kw.lower():
-                        iban_match = re.search(r'(\d[\d\s]{15,})', section_text)
-                        if iban_match:
-                            counterparty_iban = re.sub(r'\s+', '', iban_match.group(1))[:26]
+                    # IBAN - check for Z rachunku: or Na rachunek: sections
+                    if 'rachunk' in section_kw.lower():  # matches rachunku and rachunek
+                        # First, look for standalone line that looks like an account number
+                        for line in section_lines:
+                            # Check for line that is mostly digits (account number)
+                            cleaned = re.sub(r'\s+', '', line)
+                            if re.match(r'^\d{20,26}$', cleaned):
+                                counterparty_iban = cleaned[:26]
+                                break
+                        # Fallback to regex search in joined text
+                        if not counterparty_iban:
+                            iban_match = re.search(r'(\d[\d\s]{15,})', section_text)
+                            if iban_match:
+                                counterparty_iban = re.sub(r'\s+', '', iban_match.group(1))[:26]
                     
                     # Prowadzonego na rzecz - comma separated
                     elif 'prowadzon' in section_kw.lower():
@@ -1398,7 +1414,8 @@ def _generate_transaction_id(txn: RawTransaction) -> str:
     """
     data = f"{txn.statement_id}:{txn.booking_date}:{txn.amount}:{txn.description}"
     hash_suffix = hashlib.md5(data.encode()).hexdigest()[:8]
-    return f"{txn.statement_id}:{txn.line_number}:{hash_suffix}"
+    stmt_id = txn.statement_id or str(txn.booking_date)[:7]  # Use YYYY-MM as fallback
+    return f"velobank:{stmt_id}:{txn.line_number}:{hash_suffix}"
 
 
 def get_info(txn: RawTransaction) -> dict:
@@ -1586,8 +1603,8 @@ class VelobankSource(Source):
                         results.add_invalid_reference(
                             InvalidSourceReference(len(existing) - 1, existing))
                 else:
-                    # Create new transaction with proper account
-                    beancount_txn = self._make_transaction(txn, target_account)
+                    # Create new transaction with proper account and account_iban
+                    beancount_txn = self._make_transaction(txn, target_account, statement.account_iban)
                     results.add_pending_entry(
                         ImportResult(
                             date=txn.booking_date,
@@ -1629,12 +1646,13 @@ class VelobankSource(Source):
         for account in all_accounts:
             results.add_account(account)
 
-    def _make_transaction(self, txn: RawTransaction, target_account: str) -> Transaction:
+    def _make_transaction(self, txn: RawTransaction, target_account: str, account_iban: str = '') -> Transaction:
         """Create a Beancount Transaction from a raw transaction.
 
         Args:
             txn: The raw transaction.
             target_account: The Beancount account to use for this transaction.
+            account_iban: The IBAN of the account this transaction belongs to.
 
         Returns:
             A Beancount Transaction.
@@ -1659,6 +1677,8 @@ class VelobankSource(Source):
             meta[TITLE_KEY] = txn.title
         if txn.card_number:
             meta[CARD_NUMBER_KEY] = txn.card_number
+        if account_iban:
+            meta[ACCOUNT_IBAN_KEY] = account_iban
         # Add transaction date if different from booking date
         if txn.transaction_date != txn.booking_date:
             meta[TRANSACTION_DATE_KEY] = txn.transaction_date
