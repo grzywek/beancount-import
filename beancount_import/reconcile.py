@@ -524,8 +524,19 @@ class LoadedReconciler(object):
         invalid_references = [
         ]  # type: List[Tuple[Source, InvalidSourceReference]]
         all_source_results = []  # type: List[SourceResults]
+        
+        # Parse earliest_transaction from options
+        earliest_transaction = self.reconciler.options.get('earliest_transaction')
+        if earliest_transaction is not None:
+            if isinstance(earliest_transaction, str):
+                earliest_transaction = datetime.date.fromisoformat(earliest_transaction)
+            elif not isinstance(earliest_transaction, datetime.date):
+                self.reconciler.log_status(
+                    f'Warning: earliest_transaction must be YYYY-MM-DD string or date, got {type(earliest_transaction)}')
+                earliest_transaction = None
+        
         for source in self.sources:
-            source_results = SourceResults()
+            source_results = SourceResults(earliest_transaction=earliest_transaction)
             source.prepare(self.editor, source_results)
             for account in source_results.accounts:
                 self.account_source_map[account] = source

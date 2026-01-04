@@ -730,6 +730,12 @@ def parse_arguments(argv, **kwargs):
         help=
         'Cache file for automatic account prediction classifier.  This speeds up loading.'
     )
+    argparser.add_argument(
+        '--earliest_transaction',
+        type=str,
+        help=
+        'Earliest transaction date to import (YYYY-MM-DD). Transactions before this date are skipped.'
+    )
     argparser.set_defaults(**kwargs)
     return argparser.parse_args(argv)
 

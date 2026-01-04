@@ -118,7 +118,7 @@ def invalid_source_reference_sort_key(
 
 
 class SourceResults:
-    def __init__(self):
+    def __init__(self, earliest_transaction: Optional[datetime.date] = None):
         self.pending = []  # type: List[ImportResult]
         self.accounts = set()  # type: Set[str]
         self.skip_training_accounts = set() # type: Set[str]
@@ -126,14 +126,21 @@ class SourceResults:
         self.messages = []  # type: List[Tuple[str, str, Optional[Meta]]]
         self.seen_messages = set(
         )  # type: Set[Tuple[str, str, FrozenSet[Tuple[str, Any]]]]
+        self.earliest_transaction = earliest_transaction
 
     def add_pending_entry(self, entry: ImportResult):
-        """Adds a generated ImportResult."""
+        """Adds a generated ImportResult.
+        
+        If earliest_transaction is set, entries with dates before it are skipped.
+        """
+        if self.earliest_transaction and entry.date < self.earliest_transaction:
+            return  # Skip entries before earliest_transaction
         self.pending.append(entry)
 
     def add_pending_entries(self, entries: Iterable[ImportResult]):
         """Calls `add_pending_entry` for each entry in `entries`."""
-        self.pending.extend(entries)
+        for entry in entries:
+            self.add_pending_entry(entry)
 
     def add_account(self, account: str) -> None:
         """Indicates that the source is authoritative for `account`."""
