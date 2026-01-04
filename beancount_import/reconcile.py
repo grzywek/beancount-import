@@ -527,9 +527,11 @@ class LoadedReconciler(object):
         
         # Parse earliest_transaction from options
         earliest_transaction = self.reconciler.options.get('earliest_transaction')
+        self.reconciler.log_status(f'earliest_transaction from options: {earliest_transaction!r}')
         if earliest_transaction is not None:
             if isinstance(earliest_transaction, str):
                 earliest_transaction = datetime.date.fromisoformat(earliest_transaction)
+                self.reconciler.log_status(f'Parsed earliest_transaction: {earliest_transaction}')
             elif not isinstance(earliest_transaction, datetime.date):
                 self.reconciler.log_status(
                     f'Warning: earliest_transaction must be YYYY-MM-DD string or date, got {type(earliest_transaction)}')
@@ -537,6 +539,7 @@ class LoadedReconciler(object):
         
         for source in self.sources:
             source_results = SourceResults(earliest_transaction=earliest_transaction)
+            self.reconciler.log_status(f'preparing source {source.name}')
             source.prepare(self.editor, source_results)
             for account in source_results.accounts:
                 self.account_source_map[account] = source
