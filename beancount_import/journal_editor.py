@@ -632,6 +632,7 @@ def get_meta_ignore() -> FrozenSet[str]:
     printer = beancount.parser.printer.EntryPrinter()
     meta_ignore = set(printer.META_IGNORE)
     meta_ignore.add('__tolerances__')
+    meta_ignore.add('__automatic__')  # Added by beancount for auto-balanced postings
     return frozenset(meta_ignore)
 
 
