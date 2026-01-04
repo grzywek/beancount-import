@@ -1659,7 +1659,7 @@ class VelobankSource(Source):
             meta[CARD_NUMBER_KEY] = txn.card_number
         # Add transaction date if different from booking date
         if txn.transaction_date != txn.booking_date:
-            meta[TRANSACTION_DATE_KEY] = str(txn.transaction_date)
+            meta[TRANSACTION_DATE_KEY] = txn.transaction_date
 
         amount = Amount(txn.amount, DEFAULT_CURRENCY)
 
