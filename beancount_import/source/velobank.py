@@ -115,6 +115,7 @@ ACCOUNT_IBAN_KEY = 'account_iban'  # Own account IBAN
 CARD_NUMBER_KEY = 'card_number'  # Card number for card operations
 TRANSACTION_DATE_KEY = 'transaction_date'  # Original transaction date
 COUNTERPARTY_ADDRESS_KEY = 'counterparty_address'  # Counterparty address
+SOURCE_BANK_KEY = 'source_bank'  # Bank name for this source
 
 # Currency
 DEFAULT_CURRENCY = 'PLN'
@@ -1643,6 +1644,7 @@ class VelobankSource(Source):
         # Build metadata
         meta = collections.OrderedDict([
             (SOURCE_REF_KEY, txn_id),
+            (SOURCE_BANK_KEY, 'VeloBank'),
             (TRANSACTION_TYPE_KEY, txn.transaction_type or txn.description),
         ])
 
