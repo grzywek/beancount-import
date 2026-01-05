@@ -1468,6 +1468,7 @@ def _generate_transaction_id(txn: RawTransaction) -> str:
     """Generate a unique ID for a transaction.
 
     Uses statement ID, date, amount and description hash.
+    Note: line_number is NOT used as it's unstable across different PDF extraction modes.
 
     Args:
         txn: The raw transaction.
@@ -1475,10 +1476,12 @@ def _generate_transaction_id(txn: RawTransaction) -> str:
     Returns:
         A unique identifier string.
     """
+    # Include all stable transaction details for uniqueness
     data = f"{txn.statement_id}:{txn.booking_date}:{txn.amount}:{txn.description}"
     hash_suffix = hashlib.md5(data.encode()).hexdigest()[:8]
     stmt_id = txn.statement_id or str(txn.booking_date)[:7]  # Use YYYY-MM as fallback
-    return f"velobank:{stmt_id}:{txn.line_number}:{hash_suffix}"
+    # Format: velobank:{statement_id}:{hash} - no line_number for stability
+    return f"velobank:{stmt_id}:{hash_suffix}"
 
 
 def get_info(txn: RawTransaction) -> dict:
