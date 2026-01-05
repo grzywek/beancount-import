@@ -517,6 +517,16 @@ def _parse_old_format_transactions(
                 if re.match(r'^(?:\d{4}\.\d{2}\.\d{2}|\d{2}\.\d{2}\.\d{4})', cont_line):
                     break
 
+                # Fallback: if we have a non-empty cont line that doesn't match any pattern,
+                # and we don't have a title yet, use it as title (e.g., "Automatyczna spłata karty kredytowe 5371656")
+                # Skip known footer/header patterns
+                if (not title and cont_line and 
+                    not cont_line.startswith('Dokument wygenerowany') and
+                    not 'VeloBank S.A.' in cont_line and
+                    not 'Saldo' in cont_line and
+                    not re.match(r'^(DATA|KWOTA|OPIS|SALDO)', cont_line, re.IGNORECASE)):
+                    title = cont_line
+
                 i += 1
 
             # For card operations, extract merchant name as counterparty
