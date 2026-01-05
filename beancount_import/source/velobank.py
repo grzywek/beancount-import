@@ -117,6 +117,12 @@ TRANSACTION_DATE_KEY = 'transaction_date'  # Value/transaction date (when money 
 BOOKING_DATE_KEY = 'booking_date'  # Booking date (when bank recorded it)
 COUNTERPARTY_ADDRESS_KEY = 'counterparty_address'  # Counterparty address
 SOURCE_BANK_KEY = 'source_bank'  # Bank name for this source
+# Tax payment metadata keys
+TAX_NIP_KEY = 'tax_nip'  # NIP identifier for tax payments
+TAX_SYMBOL_KEY = 'tax_symbol'  # Tax symbol (e.g., VAT-7K, PIT-28)
+TAX_PERIOD_KEY = 'tax_period'  # Settlement period (e.g., 24K01)
+TAX_OBLIGATION_KEY = 'tax_obligation'  # Obligation identification
+TAX_PAYER_KEY = 'tax_payer'  # Obligor/payer data
 
 # Currency
 DEFAULT_CURRENCY = 'PLN'
@@ -127,6 +133,7 @@ TRANSACTION_TYPE_TRANSLATIONS = {
     'Przelew przychodzący wewnętrzny': 'Incoming internal transfer',
     'Przelew wychodzący zewnętrzny': 'Outgoing external transfer',
     'Przelew wychodzący wewnętrzny': 'Outgoing internal transfer',
+    'Przelew do Urzędu Skarbowego': 'Tax office payment',
     'Operacja kartą': 'Card payment',
     'Spłata kredytu': 'Loan repayment',
     'Przeksięgowanie kredytu': 'Loan transfer',
@@ -182,6 +189,11 @@ class RawTransaction(NamedTuple):
     counterparty_address: Optional[str] = None
     title: Optional[str] = None
     card_number: Optional[str] = None
+    # Tax payment fields
+    tax_nip: Optional[str] = None
+    tax_symbol: Optional[str] = None
+    tax_period: Optional[str] = None
+    tax_payer: Optional[str] = None
 
 
 class StatementInfo(NamedTuple):
@@ -1211,6 +1223,11 @@ def _parse_transactions_nolayout(
                 counterparty_address = None
                 title = None
                 card_number = None
+                # Tax payment fields
+                tax_nip = None
+                tax_symbol = None
+                tax_period = None
+                tax_payer = None
                 
                 # Define keywords that start new sections
                 keywords = ['Z rachunku:', 'Na rachunek:', 'Prowadzon', 'Nadawca:', 'Odbiorca:', 'Tytułem:', 'Tytuł:']
@@ -1235,6 +1252,10 @@ def _parse_transactions_nolayout(
                             current_lines = [desc_line]
                         elif 'Na rachunek:' in desc_line or 'na rachunek:' in desc_line.lower():
                             current_section = 'Na rachunek:'
+                            current_lines = [desc_line]
+                        # Tax payment - special format
+                        elif 'Urzędu Skarbowego' in desc_line:
+                            current_section = 'TAX'
                             current_lines = [desc_line]
                         continue
                     
@@ -1294,7 +1315,7 @@ def _parse_transactions_nolayout(
                     elif section_kw.lower() in ['nadawca:', 'odbiorca:']:
                         on_match = re.search(r'(?:Nadawca|Odbiorca):\s*(.+)', section_lines[0], re.IGNORECASE)
                         if on_match:
-                            counterparty = on_match.group(1).strip()
+                            counterparty = on_match.group(1).strip().rstrip(',')
                         # Remaining lines are address
                         if len(section_lines) > 1:
                             counterparty_address = ' '.join(line.strip() for line in section_lines[1:])
@@ -1310,6 +1331,32 @@ def _parse_transactions_nolayout(
                         # Combine all lines (first has merchant, rest is location continuation)
                         combined_text = ' '.join(line.strip() for line in section_lines)
                         counterparty, counterparty_address = _extract_card_merchant(combined_text)
+                    
+                    # Tax payment - parse special fields
+                    elif section_kw == 'TAX':
+                        section_text = ' '.join(section_lines)
+                        # Extract IBAN from "na rachunek : XX XXXX XXXX..."
+                        iban_match = re.search(r'na rachunek\s*:\s*(\d[\d\s]{15,})', section_text, re.IGNORECASE)
+                        if iban_match:
+                            counterparty_iban = re.sub(r'\s+', '', iban_match.group(1))[:26]
+                        # Extract NIP
+                        nip_match = re.search(r'Identyfikator:\s*(\d+)', section_text)
+                        if nip_match:
+                            tax_nip = nip_match.group(1)
+                        # Extract tax symbol (VAT-7K, PIT-28, etc.)
+                        symbol_match = re.search(r'Symbol:\s*([A-Z0-9-]+)', section_text)
+                        if symbol_match:
+                            tax_symbol = symbol_match.group(1)
+                        # Extract period
+                        period_match = re.search(r'Okres rozliczenia:\s*(\S+)', section_text)
+                        if period_match:
+                            tax_period = period_match.group(1)
+                        # Extract payer data
+                        payer_match = re.search(r'Dane zobowiązanego:\s*(.+?)(?:$|Symbol|Identyf)', section_text)
+                        if payer_match:
+                            tax_payer = payer_match.group(1).strip()
+                        # Set counterparty as "Urząd Skarbowy"
+                        counterparty = 'Urząd Skarbowy'
 
                 transactions.append(RawTransaction(
                     transaction_date=txn_date,
@@ -1326,6 +1373,10 @@ def _parse_transactions_nolayout(
                     counterparty_address=counterparty_address,
                     title=title,
                     card_number=card_number,
+                    tax_nip=tax_nip,
+                    tax_symbol=tax_symbol,
+                    tax_period=tax_period,
+                    tax_payer=tax_payer,
                 ))
                 
                 # Reset for next transaction
@@ -1732,6 +1783,16 @@ class VelobankSource(Source):
             meta[CARD_NUMBER_KEY] = txn.card_number
         if account_iban:
             meta[ACCOUNT_IBAN_KEY] = account_iban
+        
+        # Tax payment metadata
+        if txn.tax_nip:
+            meta[TAX_NIP_KEY] = txn.tax_nip
+        if txn.tax_symbol:
+            meta[TAX_SYMBOL_KEY] = txn.tax_symbol
+        if txn.tax_period:
+            meta[TAX_PERIOD_KEY] = txn.tax_period
+        if txn.tax_payer:
+            meta[TAX_PAYER_KEY] = txn.tax_payer
         
         # Always add booking_date (when bank recorded the transaction)
         meta[BOOKING_DATE_KEY] = txn.booking_date
