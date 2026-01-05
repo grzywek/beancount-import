@@ -287,10 +287,12 @@ def extract_pdf_text(pdf_path: str) -> str:
         RuntimeError: If pdftotext fails or is not available.
     """
     try:
-        # Use pdftotext WITHOUT -layout for cleaner line-by-line output
-        # This avoids column merging issues and produces predictable structure
+        # Use pdftotext WITH -layout to preserve column positions in tables
+        # VeloBank statements have tabular format where dates, descriptions, 
+        # amounts and balances are in separate columns. Without -layout flag,
+        # the columns get interleaved causing transaction data to be lost.
         result = subprocess.run(
-            ['pdftotext', pdf_path, '-'],
+            ['pdftotext', '-layout', pdf_path, '-'],
             capture_output=True,
             text=True,
             check=True,
@@ -330,7 +332,7 @@ def detect_format(text: str) -> str:
 
 
 def parse_old_format(text: str, filename: str) -> StatementInfo:
-    """Parse a statement in the old format (2018 - early 2024).
+    """Parse a statement in the old format (2018 - early 2024) or Historia rachunku.
 
     Args:
         text: Extracted text from PDF.
@@ -352,17 +354,29 @@ def parse_old_format(text: str, filename: str) -> StatementInfo:
     header_pattern = re.compile(
         r'Wyciąg z rachunku(?:\s+nr)?\s+(\d+/\d{4})\s+za okres\s+(\d{4}\.\d{2}\.\d{2})\s*-\s*(\d{4}\.\d{2}\.\d{2})'
     )
+    
+    # Historia rachunku format: "Za okres od DD.MM.YYYY do DD.MM.YYYY"
+    history_period_pattern = re.compile(
+        r'Za okres od\s+(\d{2}\.\d{2}\.\d{4})\s+do\s+(\d{2}\.\d{2}\.\d{4})'
+    )
 
     # Look for account number
     iban_pattern = re.compile(r'(?:NUMER RACHUNKU|Numer rachunku)[:\s]*([\d\s]{20,})')
 
     for line in lines:
-        # Try to extract header
+        # Try to extract header (old format)
         header_match = header_pattern.search(line)
         if header_match:
             statement_id = header_match.group(1)
             period_start = parse_polish_date(header_match.group(2))
             period_end = parse_polish_date(header_match.group(3))
+        
+        # Try to extract period (Historia rachunku format: DD.MM.YYYY)
+        if not period_start:
+            history_match = history_period_pattern.search(line)
+            if history_match:
+                period_start = datetime.datetime.strptime(history_match.group(1), '%d.%m.%Y').date()
+                period_end = datetime.datetime.strptime(history_match.group(2), '%d.%m.%Y').date()
 
         # Try to extract IBAN
         iban_match = iban_pattern.search(line)
@@ -401,13 +415,19 @@ def _parse_old_format_transactions(
     - Counterparty account number
     - Counterparty name
     - Transaction title
+    
+    Supports both YYYY.MM.DD (old format) and DD.MM.YYYY (Historia rachunku) date formats.
+    Supports amounts with optional PLN suffix.
     """
     transactions = []
 
     # Pattern to match transaction start line
-    # Two dates followed by description and amount columns
+    # Two dates (YYYY.MM.DD or DD.MM.YYYY) followed by description and amount columns
+    # Amounts may have optional PLN suffix
+    date_pattern = r'(?:\d{4}\.\d{2}\.\d{2}|\d{2}\.\d{2}\.\d{4})'
+    amount_pattern = r'[-\s\d]+[,]\d{2}(?:\s*PLN)?'
     txn_start_pattern = re.compile(
-        r'^(\d{4}\.\d{2}\.\d{2})\s+(\d{4}\.\d{2}\.\d{2})\s+(.+?)\s+([-\s\d]+[,]\d{2})\s+([-\s\d]+[,]\d{2})\s*$'
+        rf'^({date_pattern})\s+({date_pattern})\s+(.+?)\s+({amount_pattern})\s+({amount_pattern})\s*$'
     )
 
     # Patterns for continuation lines
@@ -419,7 +439,8 @@ def _parse_old_format_transactions(
         r'(?:Odbiorca|Nadawca)[:\s]*(.*)', re.IGNORECASE)
     counterparty_pattern = re.compile(
         r'(?:Prowadzony na rzecz|Prowadzonego na rzecz)[:\s]*(.*)', re.IGNORECASE)
-    title_pattern = re.compile(r'Tytułem[:\s]*(.*)', re.IGNORECASE)
+    # Title patterns: both "Tytułem:" (old format) and "Tytuł:" (Historia rachunku)
+    title_pattern = re.compile(r'(?:Tytułem|Tytuł)[:\s]*(.*)', re.IGNORECASE)
 
     i = 0
     line_number = 0
@@ -485,7 +506,8 @@ def _parse_old_format_transactions(
                     continue
 
                 # Check if line looks like a date (next transaction on different page)
-                if re.match(r'^\d{4}\.\d{2}\.\d{2}', cont_line):
+                # Supports both YYYY.MM.DD and DD.MM.YYYY formats
+                if re.match(r'^(?:\d{4}\.\d{2}\.\d{2}|\d{2}\.\d{2}\.\d{4})', cont_line):
                     break
 
                 i += 1
@@ -1020,8 +1042,8 @@ def _extract_transaction_type(description: str) -> str:
 def parse_pdf_statement(pdf_path: str) -> StatementInfo:
     """Parse a VeloBank PDF statement.
 
-    Uses pdftotext without -layout flag for cleaner line-by-line output.
-    This unified parser works for all statement formats (2018-2025+).
+    Uses pdftotext with -layout flag to preserve column positions.
+    Detects format and delegates to appropriate parser.
 
     Args:
         pdf_path: Path to the PDF file.
@@ -1030,95 +1052,19 @@ def parse_pdf_statement(pdf_path: str) -> StatementInfo:
         StatementInfo containing all parsed data.
     """
     text = extract_pdf_text(pdf_path)
-    lines = [line.strip() for line in text.split('\n')]
     filename = os.path.basename(pdf_path)
-
-    # Extract header info
-    statement_id = ''
-    account_iban = ''
-    period_start = None
-    period_end = None
-    opening_balance = None
-
-    # Patterns for header extraction
-    # Old format: "Wyciąg z rachunku 2/2018 za okres 2018.04.01 - 2018.04.30"
-    # New format: "Wyciąg nr 11/2025" then "Wyciąg za okres od 2025.11.01 do 2025.11.30"
-    # History format: "Za okres od 01.05.2025 do 31.05.2025" (DD.MM.YYYY)
-    stmt_pattern = re.compile(r'Wyciąg(?:\s+z\s+rachunku)?(?:\s+nr)?\s+(\d+/\d{4})')
-    period_pattern_old = re.compile(r'za okres\s+(\d{4}\.\d{2}\.\d{2})\s*-\s*(\d{4}\.\d{2}\.\d{2})')
-    period_pattern_new = re.compile(r'za okres od\s+(\d{4}\.\d{2}\.\d{2})\s+do\s+(\d{4}\.\d{2}\.\d{2})')
-    period_pattern_history = re.compile(r'Za okres od\s+(\d{2}\.\d{2}\.\d{4})\s+do\s+(\d{2}\.\d{2}\.\d{4})')
     
-    # IBAN patterns - try multiple formats
-    iban_pattern_full = re.compile(r'IBAN[:\s]*(PL[\s\d]+)')
-    iban_pattern_num = re.compile(r'NUMER RACHUNKU|Numer rachunku')
-
-    for i, line in enumerate(lines):
-        # Statement ID
-        if not statement_id:
-            match = stmt_pattern.search(line)
-            if match:
-                statement_id = match.group(1)
-        
-        # Period (old format)
-        if not period_start:
-            match = period_pattern_old.search(line)
-            if match:
-                period_start = parse_polish_date(match.group(1))
-                period_end = parse_polish_date(match.group(2))
-        
-        # Period (new format)
-        if not period_start:
-            match = period_pattern_new.search(line)
-            if match:
-                period_start = parse_polish_date(match.group(1))
-                period_end = parse_polish_date(match.group(2))
-        
-        # Period (history format: DD.MM.YYYY)
-        if not period_start:
-            match = period_pattern_history.search(line)
-            if match:
-                period_start = datetime.datetime.strptime(match.group(1), '%d.%m.%Y').date()
-                period_end = datetime.datetime.strptime(match.group(2), '%d.%m.%Y').date()
-        
-        # IBAN (with PL prefix already)
-        if not account_iban:
-            match = iban_pattern_full.search(line)
-            if match:
-                account_iban = re.sub(r'\s+', '', match.group(1))
-        
-        # IBAN (numeric only from NUMER RACHUNKU, add PL prefix)
-        if not account_iban and i < len(lines) - 3:
-            if iban_pattern_num.search(line):
-                # Look in next few lines for account number (may have empty line first)
-                for j in range(i + 1, min(i + 4, len(lines))):
-                    check_line = lines[j].strip()
-                    if re.match(r'^[\d\s]{20,}$', check_line):
-                        account_iban = 'PL' + re.sub(r'\s+', '', check_line)
-                        break
-        
-        # Opening balance
-        if opening_balance is None and 'Saldo początkowe' in line:
-            # Look for amount in next few lines
-            for j in range(i + 1, min(i + 4, len(lines))):
-                try:
-                    opening_balance = parse_polish_amount(lines[j])
-                    break
-                except:
-                    continue
-
-    # Parse transactions using state machine
-    transactions = _parse_transactions_nolayout(lines, statement_id, filename)
-
-    return StatementInfo(
-        filename=filename,
-        statement_id=statement_id,
-        account_iban=account_iban,
-        period_start=period_start,
-        period_end=period_end,
-        opening_balance=opening_balance,
-        transactions=transactions,
-    )
+    # Detect format and use appropriate parser
+    fmt = detect_format(text)
+    
+    if fmt == 'history':
+        # History format uses DD.MM.YYYY dates - old format parser now supports both
+        return parse_old_format(text, filename)
+    elif fmt == 'new':
+        return parse_new_format(text, filename)
+    else:
+        # Old format (2018-2024)
+        return parse_old_format(text, filename)
 
 
 # Parser states
