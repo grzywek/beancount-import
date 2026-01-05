@@ -493,20 +493,15 @@ def _parse_old_format_transactions(
                 # Check for counterparty name
                 cp_match = counterparty_pattern.search(cont_line)
                 if cp_match:
-                    # Extract name and address from "Prowadzonego na rzecz: NAME,,ADDRESS" or "NAME,ADDRESS"
+                    # Extract name and address from "Prowadzonego na rzecz: NAME,ADDRESS" or "NAME,,ADDRESS"
+                    # Always split on FIRST comma - name is before, rest is address
                     raw_text = cp_match.group(1).strip()
-                    # Handle double-comma separator between name and address
-                    if ',,' in raw_text:
-                        parts = raw_text.split(',,', 1)
-                        counterparty = parts[0].strip().rstrip(',')
-                        if len(parts) > 1 and parts[1].strip():
-                            counterparty_address = parts[1].strip()
-                    else:
-                        # Single comma - name before first comma, rest is address
-                        parts = raw_text.split(',', 1)
-                        counterparty = parts[0].strip()
-                        if len(parts) > 1 and parts[1].strip():
-                            counterparty_address = parts[1].strip().lstrip(',').strip()
+                    parts = raw_text.split(',', 1)
+                    counterparty = parts[0].strip()
+                    if len(parts) > 1 and parts[1].strip():
+                        # Clean up address: remove leading commas/spaces, replace ,, with ,
+                        addr = parts[1].strip().lstrip(',').strip()
+                        counterparty_address = addr.replace(',,', ', ').strip()
                     i += 1
                     continue
 
@@ -1759,9 +1754,8 @@ class VelobankSource(Source):
         # Always add booking_date (when bank recorded the transaction)
         meta[BOOKING_DATE_KEY] = txn.booking_date
         
-        # Add transaction date if different from booking date
-        if txn.transaction_date != txn.booking_date:
-            meta[TRANSACTION_DATE_KEY] = txn.transaction_date
+        # Always add transaction_date (when transaction occurred)
+        meta[TRANSACTION_DATE_KEY] = txn.transaction_date
 
         amount = Amount(txn.amount, DEFAULT_CURRENCY)
 
