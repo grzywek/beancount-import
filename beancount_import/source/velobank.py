@@ -459,6 +459,7 @@ def _parse_old_format_transactions(
             # Collect continuation lines
             counterparty = None
             counterparty_iban = None
+            counterparty_address = None
             title = None
 
             i += 1
@@ -492,9 +493,20 @@ def _parse_old_format_transactions(
                 # Check for counterparty name
                 cp_match = counterparty_pattern.search(cont_line)
                 if cp_match:
-                    # Extract only the name part (before first comma)
-                    raw_counterparty = cp_match.group(1).strip()
-                    counterparty = raw_counterparty.split(',')[0].strip()
+                    # Extract name and address from "Prowadzonego na rzecz: NAME,,ADDRESS" or "NAME,ADDRESS"
+                    raw_text = cp_match.group(1).strip()
+                    # Handle double-comma separator between name and address
+                    if ',,' in raw_text:
+                        parts = raw_text.split(',,', 1)
+                        counterparty = parts[0].strip().rstrip(',')
+                        if len(parts) > 1 and parts[1].strip():
+                            counterparty_address = parts[1].strip()
+                    else:
+                        # Single comma - name before first comma, rest is address
+                        parts = raw_text.split(',', 1)
+                        counterparty = parts[0].strip()
+                        if len(parts) > 1 and parts[1].strip():
+                            counterparty_address = parts[1].strip().lstrip(',').strip()
                     i += 1
                     continue
 
@@ -536,6 +548,7 @@ def _parse_old_format_transactions(
                 transaction_type=_extract_transaction_type(description),
                 counterparty=counterparty,
                 counterparty_iban=counterparty_iban,
+                counterparty_address=counterparty_address,
                 title=title,
                 card_number=_extract_card_number(description),
             ))
