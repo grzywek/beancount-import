@@ -81,7 +81,8 @@ COUNTERPARTY_IBAN_KEY = 'counterparty_iban'  # Counterparty IBAN (with country p
 COUNTERPARTY_BBAN_KEY = 'counterparty_bban'  # Counterparty BBAN (without country prefix)
 ACCOUNT_IBAN_KEY = 'account_iban'  # Own account IBAN
 TITLE_KEY = 'title'  # Transaction title/remittance
-TRANSACTION_DATE_KEY = 'transaction_date'  # Original transaction date (if different from booking)
+TRANSACTION_DATE_KEY = 'transaction_date'  # Value/transaction date (when money moved)
+BOOKING_DATE_KEY = 'booking_date'  # Booking date (when bank recorded it)
 
 
 def _split_counterparty_address(name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -650,6 +651,9 @@ class EnableBankingSource(Source):
                 meta[COUNTERPARTY_IBAN_KEY] = counterparty_iban
             else:
                 meta[COUNTERPARTY_BBAN_KEY] = counterparty_iban
+        
+        # Add booking_date (when bank recorded it)
+        meta[BOOKING_DATE_KEY] = txn.booking_date
         
         # Add transaction_date if different from booking_date (as proper date object for matching)
         if txn.transaction_date and txn.transaction_date != txn.booking_date:

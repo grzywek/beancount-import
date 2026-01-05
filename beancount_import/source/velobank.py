@@ -113,7 +113,8 @@ COUNTERPARTY_IBAN_KEY = 'counterparty_iban'  # Counterparty IBAN (with country p
 COUNTERPARTY_BBAN_KEY = 'counterparty_bban'  # Counterparty BBAN (without country prefix)
 ACCOUNT_IBAN_KEY = 'account_iban'  # Own account IBAN
 CARD_NUMBER_KEY = 'card_number'  # Card number for card operations
-TRANSACTION_DATE_KEY = 'transaction_date'  # Original transaction date
+TRANSACTION_DATE_KEY = 'transaction_date'  # Value/transaction date (when money moved)
+BOOKING_DATE_KEY = 'booking_date'  # Booking date (when bank recorded it)
 COUNTERPARTY_ADDRESS_KEY = 'counterparty_address'  # Counterparty address
 SOURCE_BANK_KEY = 'source_bank'  # Bank name for this source
 
@@ -1679,6 +1680,10 @@ class VelobankSource(Source):
             meta[CARD_NUMBER_KEY] = txn.card_number
         if account_iban:
             meta[ACCOUNT_IBAN_KEY] = account_iban
+        
+        # Always add booking_date (when bank recorded the transaction)
+        meta[BOOKING_DATE_KEY] = txn.booking_date
+        
         # Add transaction date if different from booking date
         if txn.transaction_date != txn.booking_date:
             meta[TRANSACTION_DATE_KEY] = txn.transaction_date
