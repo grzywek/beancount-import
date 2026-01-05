@@ -203,6 +203,7 @@ def parse_polish_amount(text: str) -> D:
     - "1 500,00"
     - "-45,00"
     - "20 000,00"
+    - "-20 000,00 PLN" (with currency suffix)
     - "650--12.99" (malformed: two columns merged, take second part)
 
     Args:
@@ -213,6 +214,9 @@ def parse_polish_amount(text: str) -> D:
     """
     # Remove any leading/trailing whitespace
     text = text.strip()
+    
+    # Remove currency suffix (PLN, EUR, etc.)
+    text = re.sub(r'\s*(PLN|EUR|USD|GBP|CHF)\s*$', '', text, flags=re.IGNORECASE)
 
     # Remove thousands separators (spaces or non-breaking spaces) FIRST
     text = re.sub(r'[\s\u00a0]+', '', text)
@@ -233,8 +237,9 @@ def parse_polish_date(text: str) -> datetime.date:
     """Parse a Polish-formatted date string.
 
     Handles formats like:
-    - "2024.01.02"
-    - "2024-01-02"
+    - "2024.01.02" (YYYY.MM.DD)
+    - "2024-01-02" (YYYY-MM-DD)
+    - "01.02.2024" (DD.MM.YYYY)
 
     Args:
         text: Date string.
@@ -245,7 +250,14 @@ def parse_polish_date(text: str) -> datetime.date:
     text = text.strip()
     # Handle both . and - separators
     if '.' in text:
-        return datetime.datetime.strptime(text, '%Y.%m.%d').date()
+        # Check if it's DD.MM.YYYY or YYYY.MM.DD
+        parts = text.split('.')
+        if len(parts[0]) == 4:
+            # YYYY.MM.DD format
+            return datetime.datetime.strptime(text, '%Y.%m.%d').date()
+        else:
+            # DD.MM.YYYY format
+            return datetime.datetime.strptime(text, '%d.%m.%Y').date()
     else:
         return datetime.datetime.strptime(text, '%Y-%m-%d').date()
 
@@ -286,8 +298,13 @@ def detect_format(text: str) -> str:
         text: Extracted text from PDF.
 
     Returns:
-        'old' or 'new' format identifier.
+        'old', 'new', or 'history' format identifier.
     """
+    # "Historia rachunku" format - account history export (late 2024+)
+    # Has "Historia rachunku" header and uses transaction layout similar to new format
+    if 'Historia rachunku' in text:
+        return 'history'
+
     # New format has header starting with "VeloBank S.A." and different layout
     if 'VeloBank S.A.' in text and 'Wyciąg nr ' in text:
         return 'new'
@@ -516,13 +533,21 @@ def parse_new_format(text: str, filename: str) -> StatementInfo:
     # Look for statement number: "Wyciąg nr 7718519"
     statement_pattern = re.compile(r'Wyciąg nr\s+(\d+)')
 
-    # Look for period: "Wyciąg za okres od 2024.12.01 do 2024.12.31"
+    # Look for period - two formats:
+    # 1. "Wyciąg za okres od 2024.12.01 do 2024.12.31" (YYYY.MM.DD)
+    # 2. "Za okres od 01.05.2025 do 31.05.2025" (DD.MM.YYYY - Historia rachunku format)
     period_pattern = re.compile(
         r'Wyciąg za okres od\s+(\d{4}\.\d{2}\.\d{2})\s+do\s+(\d{4}\.\d{2}\.\d{2})'
     )
+    period_pattern_history = re.compile(
+        r'Za okres od\s+(\d{2}\.\d{2}\.\d{4})\s+do\s+(\d{2}\.\d{2}\.\d{4})'
+    )
 
-    # Look for IBAN: "IBAN: PL 42 1560 0013 2001 5256 4000 0001"
+    # Look for IBAN - two formats:
+    # 1. "IBAN: PL 42 1560 0013 2001 5256 4000 0001"
+    # 2. "NUMER RACHUNKU: 42 1560 0013 2001 5256 4000 0001" (Historia rachunku format)
     iban_pattern = re.compile(r'IBAN[:\s]*(PL[\s\d]+)')
+    account_pattern = re.compile(r'NUMER RACHUNKU[:\s]*([\d\s]{20,})')
 
     # Look for opening balance: "Saldo początkowe ... -6 961,43"
     opening_pattern = re.compile(r'Saldo początkowe\s+([-\s\d,]+)')
@@ -533,16 +558,34 @@ def parse_new_format(text: str, filename: str) -> StatementInfo:
         if stmt_match:
             statement_id = stmt_match.group(1)
 
-        # Try to extract period
+        # Try to extract period (new format: YYYY.MM.DD)
         period_match = period_pattern.search(line)
         if period_match:
             period_start = parse_polish_date(period_match.group(1))
             period_end = parse_polish_date(period_match.group(2))
+        
+        # Try to extract period (history format: DD.MM.YYYY)
+        if not period_start:
+            history_match = period_pattern_history.search(line)
+            if history_match:
+                # Parse DD.MM.YYYY format
+                period_start = datetime.datetime.strptime(
+                    history_match.group(1), '%d.%m.%Y').date()
+                period_end = datetime.datetime.strptime(
+                    history_match.group(2), '%d.%m.%Y').date()
 
-        # Try to extract IBAN
+        # Try to extract IBAN (standard format)
         iban_match = iban_pattern.search(line)
         if iban_match:
             account_iban = re.sub(r'\s+', '', iban_match.group(1))
+        
+        # Try to extract IBAN (Historia rachunku format: NUMER RACHUNKU)
+        if not account_iban:
+            account_match = account_pattern.search(line)
+            if account_match:
+                raw_iban = re.sub(r'\s+', '', account_match.group(1))
+                # Add PL prefix if not present
+                account_iban = 'PL' + raw_iban if not raw_iban.startswith('PL') else raw_iban
 
         # Try to extract opening balance
         opening_match = opening_pattern.search(line)
@@ -988,9 +1031,11 @@ def parse_pdf_statement(pdf_path: str) -> StatementInfo:
     # Patterns for header extraction
     # Old format: "Wyciąg z rachunku 2/2018 za okres 2018.04.01 - 2018.04.30"
     # New format: "Wyciąg nr 11/2025" then "Wyciąg za okres od 2025.11.01 do 2025.11.30"
+    # History format: "Za okres od 01.05.2025 do 31.05.2025" (DD.MM.YYYY)
     stmt_pattern = re.compile(r'Wyciąg(?:\s+z\s+rachunku)?(?:\s+nr)?\s+(\d+/\d{4})')
     period_pattern_old = re.compile(r'za okres\s+(\d{4}\.\d{2}\.\d{2})\s*-\s*(\d{4}\.\d{2}\.\d{2})')
     period_pattern_new = re.compile(r'za okres od\s+(\d{4}\.\d{2}\.\d{2})\s+do\s+(\d{4}\.\d{2}\.\d{2})')
+    period_pattern_history = re.compile(r'Za okres od\s+(\d{2}\.\d{2}\.\d{4})\s+do\s+(\d{2}\.\d{2}\.\d{4})')
     
     # IBAN patterns - try multiple formats
     iban_pattern_full = re.compile(r'IBAN[:\s]*(PL[\s\d]+)')
@@ -1016,6 +1061,13 @@ def parse_pdf_statement(pdf_path: str) -> StatementInfo:
             if match:
                 period_start = parse_polish_date(match.group(1))
                 period_end = parse_polish_date(match.group(2))
+        
+        # Period (history format: DD.MM.YYYY)
+        if not period_start:
+            match = period_pattern_history.search(line)
+            if match:
+                period_start = datetime.datetime.strptime(match.group(1), '%d.%m.%Y').date()
+                period_end = datetime.datetime.strptime(match.group(2), '%d.%m.%Y').date()
         
         # IBAN (with PL prefix already)
         if not account_iban:
@@ -1065,13 +1117,13 @@ STATE_LOOKING_FOR_BALANCE = 3
 
 
 def _is_date_line(line: str) -> bool:
-    """Check if line contains only a date in YYYY.MM.DD format."""
-    return bool(re.match(r'^\d{4}\.\d{2}\.\d{2}$', line))
+    """Check if line contains only a date in YYYY.MM.DD or DD.MM.YYYY format."""
+    return bool(re.match(r'^(\d{4}\.\d{2}\.\d{2}|\d{2}\.\d{2}\.\d{4})$', line))
 
 
 def _is_amount_line(line: str) -> bool:
-    """Check if line contains only an amount (like -1 234,56 or 56,78)."""
-    return bool(re.match(r'^-?[\d\s]+,\d{2}$', line))
+    """Check if line contains only an amount (like -1 234,56 or 56,78 or -20 000,00 PLN)."""
+    return bool(re.match(r'^-?[\d\s]+,\d{2}(\s*PLN)?$', line))
 
 
 def _parse_transactions_nolayout(
@@ -1161,7 +1213,7 @@ def _parse_transactions_nolayout(
                 card_number = None
                 
                 # Define keywords that start new sections
-                keywords = ['Z rachunku:', 'Na rachunek:', 'Prowadzon', 'Nadawca:', 'Odbiorca:', 'Tytułem:']
+                keywords = ['Z rachunku:', 'Na rachunek:', 'Prowadzon', 'Nadawca:', 'Odbiorca:', 'Tytułem:', 'Tytuł:']
                 
                 # Build sections - each section is (keyword, content_lines)
                 sections = []
@@ -1247,9 +1299,9 @@ def _parse_transactions_nolayout(
                         if len(section_lines) > 1:
                             counterparty_address = ' '.join(line.strip() for line in section_lines[1:])
                     
-                    # Tytułem
-                    elif 'tytułem' in section_kw.lower():
-                        title_match = re.search(r'Tytułem:\s*(.+)', section_text, re.IGNORECASE)
+                    # Tytułem or Tytuł
+                    elif 'tytułem' in section_kw.lower() or 'tytuł:' in section_kw.lower():
+                        title_match = re.search(r'(?:Tytułem|Tytuł):\s*(.+)', section_text, re.IGNORECASE)
                         if title_match:
                             title = title_match.group(1).strip()
                     
