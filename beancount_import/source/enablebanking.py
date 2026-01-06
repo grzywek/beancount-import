@@ -68,7 +68,7 @@ from beancount.core.amount import Amount
 from . import ImportResult, Source, SourceResults, InvalidSourceReference
 from ..matching import FIXME_ACCOUNT
 from ..journal_editor import JournalEditor
-from .enablebanking_rules import get_parsed_transaction
+from .enablebanking_rules import get_parsed_transaction, KNOWN_TRANSACTION_TYPES
 
 
 # Metadata keys (standardized across all bank sources)
@@ -696,10 +696,11 @@ class EnableBankingSource(Source):
         if parsed:
             payee = parsed.payee
             narration = parsed.narration
-            # Set transaction_type from parsed result or bank_transaction_code
+            # Set transaction_type from parsed result (already validated)
+            # Fallback to bank_transaction_code only if it's a known type
             if parsed.transaction_type:
                 meta[TRANSACTION_TYPE_KEY] = parsed.transaction_type
-            elif txn.bank_transaction_code:
+            elif txn.bank_transaction_code and txn.bank_transaction_code in KNOWN_TRANSACTION_TYPES:
                 meta[TRANSACTION_TYPE_KEY] = txn.bank_transaction_code
             
             # Handle metadata based on where payee comes from:
@@ -726,7 +727,8 @@ class EnableBankingSource(Source):
                 narration = txn.bank_transaction_code
             else:
                 narration = 'Transaction'
-            if txn.bank_transaction_code:
+            # Only set transaction_type if it's a known type
+            if txn.bank_transaction_code and txn.bank_transaction_code in KNOWN_TRANSACTION_TYPES:
                 meta[TRANSACTION_TYPE_KEY] = txn.bank_transaction_code
 
         return Transaction(

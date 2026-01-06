@@ -80,21 +80,73 @@ def _get_title_and_type(txn: 'EnableBankingTransaction') -> tuple:
     
     Returns:
         (title, transaction_type) tuple
+        transaction_type is only returned if it's in KNOWN_TRANSACTION_TYPES
     """
     if len(txn.remittance_information) >= 2:
-        return txn.remittance_information[0], txn.remittance_information[1]
+        title = txn.remittance_information[0]
+        raw_type = txn.remittance_information[1]
+        # Only use as transaction_type if it's a known type
+        if raw_type in KNOWN_TRANSACTION_TYPES:
+            return title, raw_type
+        else:
+            return title, None
     elif len(txn.remittance_information) == 1:
         return txn.remittance_information[0], None
     return None, None
+
+
+# Known transaction types - closed catalog
+# Only these values should be used as transaction_type
+KNOWN_TRANSACTION_TYPES = {
+    # mBank types
+    'BLIK',
+    'PRZELEW',
+    'PRZELEW WEWNĘTRZNY',
+    'PRZELEW ZEWNĘTRZNY',
+    'PRZELEW PRZYCHODZĄCY',
+    'PRZELEW WYCHODZĄCY',
+    'PŁATNOŚĆ KARTĄ',
+    'PŁATNOŚĆ WEB - Loss Share',
+    'PŁATNOŚĆ WEB - Loss Share + BLIK',
+    'PŁATNOŚĆ WEB - Loss Share kod BLIK',
+    'ZLECENIE STAŁE',
+    'PODATKI',
+    'PROWIZJA',
+    'ODSETKI',
+    'OPŁATA',
+    'KAPITALIZACJA ODSETEK',
+    'WPŁATA WE WPŁATOMACIE',
+    'WPŁATA GOTÓWKI',
+    'WYPŁATA GOTÓWKI',
+    'WYPŁATA W BANKOMACIE',
+    
+    # Revolut/generic types (from bank_transaction_code)
+    'CARD_PAYMENT',
+    'OTP_PAYMENT',
+    'TRANSFER',
+    'FEE',
+    'ATM',
+    'EXCHANGE',
+    
+    # Pekao types
+    'PRZELEW KRAJOWY',
+    'PRZELEW ZAGRANICZNY',
+    'OPERACJA KARTĄ',
+}
 
 
 # =============================================================================
 # GENERIC RULES (apply to all banks)
 # =============================================================================
 
+def _get_transaction_type_if_known(value: str) -> str:
+    """Return value only if it's a known transaction type, otherwise None."""
+    return value if value in KNOWN_TRANSACTION_TYPES else None
+
+
 GENERIC_RULES: List[BankRule] = [
     # Generic rule: 2 remittance lines with counterparty
-    # counterparty -> payee, first line -> narration, second line -> type
+    # counterparty -> payee, first line -> narration, second line -> type (if known)
     BankRule(
         name='generic_two_lines_with_counterparty',
         condition=lambda txn: (
@@ -104,12 +156,13 @@ GENERIC_RULES: List[BankRule] = [
         extract=lambda txn: ParsedTransaction(
             payee=_get_counterparty(txn),
             narration=txn.remittance_information[0],
-            transaction_type=txn.remittance_information[1]
+            transaction_type=_get_transaction_type_if_known(txn.remittance_information[1])
         )
     ),
     
     # Generic rule: 2 remittance lines WITHOUT counterparty
-    # first line -> payee, second line -> type (used as narration)
+    # first line -> payee, second line -> narration
+    # transaction_type only if second line is a known type
     BankRule(
         name='generic_two_lines_no_counterparty',
         condition=lambda txn: (
@@ -118,20 +171,21 @@ GENERIC_RULES: List[BankRule] = [
         ),
         extract=lambda txn: ParsedTransaction(
             payee=txn.remittance_information[0],
-            narration=txn.remittance_information[1],  # type as narration when no title
-            transaction_type=txn.remittance_information[1]
+            narration=txn.remittance_information[1],
+            transaction_type=_get_transaction_type_if_known(txn.remittance_information[1])
         )
     ),
     
-    # Generic rule: 1 remittance line (fee, etc.)
-    # For single-line transactions (like mBank fees), the line is both narration AND type
+    # Generic rule: 1 remittance line
+    # counterparty (if exists) or bank -> payee, remittance line -> narration
+    # NO transaction_type - single line is typically a title, not a type
     BankRule(
         name='generic_single_line',
         condition=lambda txn: len(txn.remittance_information) == 1,
         extract=lambda txn: ParsedTransaction(
             payee=_get_counterparty(txn) or txn.bank,
             narration=txn.remittance_information[0],
-            transaction_type=txn.remittance_information[0]  # Single line is the type
+            transaction_type=_get_transaction_type_if_known(txn.remittance_information[0])
         )
     ),
     
@@ -145,7 +199,7 @@ GENERIC_RULES: List[BankRule] = [
         extract=lambda txn: ParsedTransaction(
             payee=_get_counterparty(txn),
             narration=txn.bank_transaction_code or 'Transaction',
-            transaction_type=txn.bank_transaction_code
+            transaction_type=_get_transaction_type_if_known(txn.bank_transaction_code) if txn.bank_transaction_code else None
         )
     ),
 ]
