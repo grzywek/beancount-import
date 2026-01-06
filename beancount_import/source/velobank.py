@@ -128,6 +128,7 @@ TAX_PAYER_KEY = 'tax_payer'  # Obligor/payer data
 DEFAULT_CURRENCY = 'PLN'
 
 # Polish to English transaction type translations
+# This is the closed catalog of known transaction types
 TRANSACTION_TYPE_TRANSLATIONS = {
     'Przelew przychodzący zewnętrzny': 'Incoming external transfer',
     'Przelew przychodzący wewnętrzny': 'Incoming internal transfer',
@@ -150,6 +151,36 @@ TRANSACTION_TYPE_TRANSLATIONS = {
     'Prowizja': 'Commission',
 }
 
+# Set of known transaction types (Polish) for validation
+KNOWN_TRANSACTION_TYPES = set(TRANSACTION_TYPE_TRANSLATIONS.keys())
+
+
+def _get_transaction_type_if_known(polish_type: str) -> Optional[str]:
+    """Get English transaction type if the Polish type is known.
+    
+    Only returns a value if the type is in the closed catalog.
+    This prevents transaction titles from being used as types.
+
+    Args:
+        polish_type: The Polish transaction type string.
+
+    Returns:
+        English translation if known, None otherwise.
+    """
+    if not polish_type:
+        return None
+    
+    # Try exact match first
+    if polish_type in TRANSACTION_TYPE_TRANSLATIONS:
+        return TRANSACTION_TYPE_TRANSLATIONS[polish_type]
+    
+    # Try prefix match (e.g., "Operacja kartą 5375..." -> "Card payment")
+    for polish, english in TRANSACTION_TYPE_TRANSLATIONS.items():
+        if polish_type.startswith(polish):
+            return english
+    
+    return None
+
 
 def _translate_transaction_type(polish_type: str) -> str:
     """Translate Polish transaction type to English.
@@ -160,16 +191,58 @@ def _translate_transaction_type(polish_type: str) -> str:
     Returns:
         English translation if available, otherwise the original Polish type.
     """
-    # Try exact match first
-    if polish_type in TRANSACTION_TYPE_TRANSLATIONS:
-        return TRANSACTION_TYPE_TRANSLATIONS[polish_type]
+    result = _get_transaction_type_if_known(polish_type)
+    return result if result else polish_type
+
+
+def _split_name_and_address(text: str) -> Tuple[str, Optional[str]]:
+    """Split counterparty name from address.
     
-    # Try prefix match (e.g., "Operacja kartą 5375..." -> "Card payment")
-    for polish, english in TRANSACTION_TYPE_TRANSLATIONS.items():
-        if polish_type.startswith(polish):
-            return english
+    Handles various patterns:
+    - "NAME ul. ADDRESS" (with space)
+    - "NAMEul. ADDRESS" (without space - PDF extraction issue)
+    - "NAME,ul. ADDRESS" (with comma)
+    - "NAME, UL. ADDRESS" (comma and space)
+    - "NAME,,ADDRESS" (double comma separator)
     
-    return polish_type
+    Address indicators: ul./Ul./UL., al./Al./AL., pl./Pl./PL.
+    
+    Args:
+        text: Full text containing name and possibly address.
+        
+    Returns:
+        Tuple of (name, address). Address is None if not found.
+    """
+    if not text:
+        return '', None
+    
+    text = text.strip()
+    
+    # First try double-comma separator (VeloBank's common pattern)
+    if ',,' in text:
+        parts = text.split(',,', 1)
+        return parts[0].strip(), parts[1].strip() if len(parts) > 1 else None
+    
+    # Try to split at address indicators (ul./Ul./UL./al./Al./AL./pl./Pl./PL.)
+    # Handle both: 'NAME ul.' and 'NAMEul.' (PDF extraction without space)
+    match = re.match(
+        r'^(.+?)(?:\s+|,\s*|(?=[Uu][Ll]\.|[Aa][Ll]\.|[Pp][Ll]\.))([Uu][Ll]\.|[Aa][Ll]\.|[Pp][Ll]\.)(.*)$', 
+        text
+    )
+    if match:
+        name = match.group(1).strip().rstrip(',')
+        address = (match.group(2) + match.group(3)).strip()
+        return name, address if address else None
+    
+    # Try comma separator (simple split)
+    if ',' in text:
+        parts = text.split(',', 1)
+        name = parts[0].strip()
+        address = parts[1].strip() if len(parts) > 1 else None
+        return name, address
+    
+    # No address found
+    return text, None
 
 
 class RawTransaction(NamedTuple):
@@ -1903,13 +1976,30 @@ class VelobankSource(Source):
         meta = collections.OrderedDict([
             (SOURCE_REF_KEY, txn_id),
             (SOURCE_BANK_KEY, 'VeloBank'),
-            (TRANSACTION_TYPE_KEY, txn.transaction_type or txn.description),
         ])
+        
+        # Only add transaction_type if it's a known type (translated to English)
+        translated_type = _get_transaction_type_if_known(txn.transaction_type or txn.description)
+        if translated_type:
+            meta[TRANSACTION_TYPE_KEY] = translated_type
 
+        # Split counterparty name from address if needed
+        counterparty_name = txn.counterparty
+        counterparty_address = txn.counterparty_address
+        
         if txn.counterparty:
-            meta[COUNTERPARTY_KEY] = txn.counterparty
-        if txn.counterparty_address:
-            meta[COUNTERPARTY_ADDRESS_KEY] = txn.counterparty_address
+            # Check if counterparty contains address (e.g., "SZWAJCA DAWIDul. KS. J. NYGI...")
+            name, addr = _split_name_and_address(txn.counterparty)
+            if addr:
+                counterparty_name = name
+                # Prefer extracted address, but don't overwrite if already set
+                if not counterparty_address:
+                    counterparty_address = addr
+
+        if counterparty_name:
+            meta[COUNTERPARTY_KEY] = counterparty_name
+        if counterparty_address:
+            meta[COUNTERPARTY_ADDRESS_KEY] = counterparty_address
         if txn.counterparty_iban:
             # VeloBank uses BBAN (without PL prefix)
             meta[COUNTERPARTY_BBAN_KEY] = txn.counterparty_iban
@@ -1940,12 +2030,12 @@ class VelobankSource(Source):
 
         # Determine payee and narration (with English translation for type)
         # Shorten payee by removing company type suffixes
-        payee = txn.counterparty or 'VeloBank'
-        if txn.counterparty:
+        payee = counterparty_name or 'VeloBank'
+        if counterparty_name:
             # Split at company type indicators and use first part
             payee_match = re.split(
                 r'\s+(?:spółka|spolka|sp\s+|sp\.|s\.a\.)',
-                txn.counterparty,
+                counterparty_name,
                 maxsplit=1,
                 flags=re.IGNORECASE
             )
