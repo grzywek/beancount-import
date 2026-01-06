@@ -363,6 +363,13 @@ def _extract_fields_from_continuation_text(text: str) -> dict:
     )
     if iban_match:
         result['counterparty_iban'] = re.sub(r'[^\d]', '', iban_match.group(1))
+    else:
+        # Fallback: if text starts with IBAN-like digits (20+ chars), extract them
+        # This handles tax payments where description ends with "na rachunek :" and
+        # continuation starts directly with account number
+        standalone_iban = re.match(r'^([\d\s]{20,})(?:\s+\D|$)', text)
+        if standalone_iban:
+            result['counterparty_iban'] = re.sub(r'[^\d]', '', standalone_iban.group(1))
     
     # Extract counterparty and address from Prowadzonego/Odbiorca/Nadawca section
     cp_match = re.search(
@@ -577,7 +584,7 @@ def _parse_old_format_transactions(
                     'Funduszu Gwarancyjnym' in cont_line or
                     'systemie gwarantowania' in cont_line or
                     'Arkuszu Informacyjnym' in cont_line or
-                    'Sąd Rejonowy' in cont_line or
+                    'Sąd Rejonowy dla m.st.' in cont_line or  # Only footer (bank registration), not counterparty
                     'Nie wymaga podpisu' in cont_line or
                     'www.bfg.pl' in cont_line or
                     'w całości opłaconym' in cont_line or
@@ -807,6 +814,13 @@ def _parse_new_format_continuation(
             # Standalone IBAN line (just digits with spaces, 20+ chars)
             elif re.match(r'^[\d\s]{20,}$', line):
                 counterparty_iban = re.sub(r'\s+', '', line)
+            # IBAN at start of line followed by Nadawca/Odbiorca/Prowadzony (new format)
+            # e.g. "56 1560 0013 2007 2768 9000 0001 Nadawca: LENC JAKUB"
+            # or   "PL44124043151111001065240969 Prowadzony na rzecz: Łukasz"
+            else:
+                iban_before_cp = re.match(r'^((?:PL)?[\d\s]{20,})\s+(?:Nadawca|Odbiorca|Prowadzony na rzecz|Prowadzonego na rzecz)[:\s]', line, re.IGNORECASE)
+                if iban_before_cp:
+                    counterparty_iban = re.sub(r'[^\d]', '', iban_before_cp.group(1))
         
         # Check for counterparty name
         if not counterparty_name:
@@ -819,13 +833,17 @@ def _parse_new_format_continuation(
                 expect_counterparty = True
             elif expect_counterparty:
                 # Collecting counterparty parts until we hit Tytułem or empty
-                if 'Tytułem' in line or not line:
+                if 'Tytułem' in line:
+                    # Line contains Tytułem - extract counterparty before it
+                    before_title = re.split(r'\s*Tytułem', line, maxsplit=1)[0].strip()
+                    if before_title:
+                        counterparty_parts.append(before_title)
                     # Done collecting - join parts and extract name
                     if counterparty_parts:
                         full_text = ' '.join(counterparty_parts)
-                        # Take name before: double-comma, address indicator, www., postal code, or Tytułem
+                        # Take name before: double-comma, address indicator, www., postal code
                         name_match = re.match(
-                            r'^([^,]+?)(?:,,|,\s*(?:UL|ul|Ul)\.|\s+www\.|\s+\d{2}-\d{3}|\s+Tytułem|$)', 
+                            r'^([^,]+?)(?:,,|,\s*(?:UL|ul|Ul)\.|\s+www\.|\s+\d{2}-\d{3}|$)', 
                             full_text
                         )
                         if name_match:
@@ -833,6 +851,21 @@ def _parse_new_format_continuation(
                         else:
                             counterparty_name = full_text.split(',')[0].strip()
                         # Normalize
+                        counterparty_name = re.sub(r' ([a-ząćęłńóśźż])', r'\1', counterparty_name)
+                        counterparty_name = re.sub(r'\s+', ' ', counterparty_name).strip()
+                    expect_counterparty = False
+                elif not line:
+                    # Empty line - finalize counterparty
+                    if counterparty_parts:
+                        full_text = ' '.join(counterparty_parts)
+                        name_match = re.match(
+                            r'^([^,]+?)(?:,,|,\s*(?:UL|ul|Ul)\.|\s+www\.|\s+\d{2}-\d{3}|$)', 
+                            full_text
+                        )
+                        if name_match:
+                            counterparty_name = name_match.group(1).strip()
+                        else:
+                            counterparty_name = full_text.split(',')[0].strip()
                         counterparty_name = re.sub(r' ([a-ząćęłńóśźż])', r'\1', counterparty_name)
                         counterparty_name = re.sub(r'\s+', ' ', counterparty_name).strip()
                     expect_counterparty = False
@@ -1609,8 +1642,8 @@ def get_velobank_account_map(accounts: Dict[str, Open]) -> Dict[str, str]:
 def _generate_transaction_id(txn: RawTransaction) -> str:
     """Generate a unique ID for a transaction.
 
-    Uses statement ID, date, amount and description hash.
-    Note: line_number is NOT used as it's unstable across different PDF extraction modes.
+    Uses booking_date, amount and balance_after - these are always stable and unique.
+    Note: statement_id and description are NOT used as they may vary.
 
     Args:
         txn: The raw transaction.
@@ -1618,12 +1651,11 @@ def _generate_transaction_id(txn: RawTransaction) -> str:
     Returns:
         A unique identifier string.
     """
-    # Include all stable transaction details for uniqueness
-    data = f"{txn.statement_id}:{txn.booking_date}:{txn.amount}:{txn.description}"
-    hash_suffix = hashlib.md5(data.encode()).hexdigest()[:8]
-    stmt_id = txn.statement_id or str(txn.booking_date)[:7]  # Use YYYY-MM as fallback
-    # Format: velobank:{statement_id}:{hash} - no line_number for stability
-    return f"velobank:{stmt_id}:{hash_suffix}"
+    # Use only stable, unique values: booking_date + amount + balance_after
+    data = f"{txn.booking_date}:{txn.amount}:{txn.balance_after}"
+    hash_value = hashlib.md5(data.encode()).hexdigest()[:12]
+    # Format: velobank:{hash}
+    return f"velobank:{hash_value}"
 
 
 def get_info(txn: RawTransaction) -> dict:
