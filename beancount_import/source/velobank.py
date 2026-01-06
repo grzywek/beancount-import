@@ -331,6 +331,82 @@ def detect_format(text: str) -> str:
     return 'old'
 
 
+def _extract_fields_from_continuation_text(text: str) -> dict:
+    """Extract IBAN, counterparty, address, and title from continuation text.
+    
+    Uses keyword-based splitting to handle any line arrangement.
+    Keywords: Z rachunku, Na rachunek, Prowadzonego na rzecz, Odbiorca, Nadawca, Tytułem, Tytuł
+    
+    Args:
+        text: Combined continuation text (all lines joined with spaces).
+        
+    Returns:
+        Dict with keys: 'counterparty_iban', 'counterparty', 'counterparty_address', 'title'
+    """
+    result = {
+        'counterparty_iban': None,
+        'counterparty': None,
+        'counterparty_address': None,
+        'title': None,
+    }
+    
+    if not text:
+        return result
+    
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # Extract IBAN/BBAN - digits after "Z rachunku:" or "Na rachunek:"
+    iban_match = re.search(
+        r'(?:Z rachunku|Na rachunek)[:\s]*([A-Z]{0,2}\s*[\d\s]{15,}?)(?=\s*(?:Prowadzon|Odbiorca|Nadawca|Tytułem|Tytuł|$))',
+        text, re.IGNORECASE
+    )
+    if iban_match:
+        result['counterparty_iban'] = re.sub(r'[^\d]', '', iban_match.group(1))
+    
+    # Extract counterparty and address from Prowadzonego/Odbiorca/Nadawca section
+    cp_match = re.search(
+        r'(?:Prowadzonego na rzecz|Prowadzony na rzecz|Odbiorca|Nadawca)[:\s]*(.+?)(?=\s*(?:Tytułem|Tytuł)|$)',
+        text, re.IGNORECASE
+    )
+    if cp_match:
+        cp_text = cp_match.group(1).strip()
+        
+        # Split at ,, or address indicators (UL., ul., AL., al., postal code XX-XXX)
+        # Also handle NO comma case - everything before first address indicator
+        name_addr_match = re.match(
+            r'^(.+?)(?:,,|,\s*(?:UL\.|ul\.|Ul\.|AL\.|al\.|Al\.)|\s+(?:UL\.|ul\.|Ul\.|AL\.|al\.|Al\.)|,\s*\d{2}-\d{3})',
+            cp_text
+        )
+        if name_addr_match:
+            result['counterparty'] = name_addr_match.group(1).strip().rstrip(',')
+            # Extract address - everything after the name
+            addr_start = name_addr_match.end(1)
+            addr = cp_text[addr_start:].strip().lstrip(',').strip()
+            if addr:
+                result['counterparty_address'] = addr
+        else:
+            # No address indicator found - full text is counterparty name (possibly with trailing address)
+            # Try to split at first comma followed by uppercase location
+            parts = cp_text.split(',', 1)
+            result['counterparty'] = parts[0].strip()
+            if len(parts) > 1 and parts[1].strip():
+                result['counterparty_address'] = parts[1].strip()
+    
+    # Normalize counterparty - fix PDF line-break artifacts
+    if result['counterparty']:
+        # Remove space before lowercase letter (PDF line break artifact)
+        result['counterparty'] = re.sub(r' ([a-ząćęłńóśźż])', r'\1', result['counterparty'])
+        result['counterparty'] = re.sub(r'\s+', ' ', result['counterparty']).strip()
+    
+    # Extract title - everything after Tytułem/Tytuł
+    title_match = re.search(r'(?:Tytułem|Tytuł)[:\s]*(.+?)$', text, re.IGNORECASE)
+    if title_match:
+        result['title'] = title_match.group(1).strip()
+    
+    return result
+
+
 def parse_old_format(text: str, filename: str) -> StatementInfo:
     """Parse a statement in the old format (2018 - early 2024) or Historia rachunku.
 
@@ -463,75 +539,70 @@ def _parse_old_format_transactions(
             title = None
 
             i += 1
+            # Phase 1: Collect all continuation lines into one string
+            continuation_lines = []
             while i < len(lines):
                 cont_line = lines[i].strip()
 
-                # Stop if we hit another transaction or empty line pattern
+                # Stop if we hit another transaction
                 if txn_start_pattern.match(cont_line):
                     break
+                
+                # Stop at date patterns (next transaction on different page)  
+                if re.match(r'^(?:\d{4}\.\d{2}\.\d{2}|\d{2}\.\d{2}\.\d{4})', cont_line):
+                    break
+                
+                # Skip empty lines
                 if not cont_line:
                     i += 1
                     continue
-
-                # Check for IBAN (account number with digits)
-                iban_match = iban_line_pattern.search(cont_line)
-                if iban_match:
-                    # Remove spaces from IBAN
-                    counterparty_iban = re.sub(r'\s+', '', iban_match.group(1))
-                    i += 1
-                    continue
-
-                # Check for recipient name (Odbiorca/Nadawca)
-                recipient_match = recipient_name_pattern.search(cont_line)
-                if recipient_match and not counterparty:
-                    # Extract only the name part (before first comma)
-                    raw_counterparty = recipient_match.group(1).strip()
-                    counterparty = raw_counterparty.split(',')[0].strip()
-                    i += 1
-                    continue
-
-                # Check for counterparty name
-                cp_match = counterparty_pattern.search(cont_line)
-                if cp_match:
-                    # Extract name and address from "Prowadzonego na rzecz: NAME,ADDRESS" or "NAME,,ADDRESS"
-                    # Always split on FIRST comma - name is before, rest is address
-                    raw_text = cp_match.group(1).strip()
-                    parts = raw_text.split(',', 1)
-                    counterparty = parts[0].strip()
-                    if len(parts) > 1 and parts[1].strip():
-                        # Clean up address: remove leading commas/spaces, replace ,, with ,
-                        addr = parts[1].strip().lstrip(',').strip()
-                        counterparty_address = addr.replace(',,', ', ').strip()
-                    i += 1
-                    continue
-
-                # Check for title
-                title_match = title_pattern.search(cont_line)
-                if title_match:
-                    title = title_match.group(1).strip()
-                    i += 1
-                    continue
-
-                # Check if line looks like a date (next transaction on different page)
-                # Supports both YYYY.MM.DD and DD.MM.YYYY formats
-                if re.match(r'^(?:\d{4}\.\d{2}\.\d{2}|\d{2}\.\d{2}\.\d{4})', cont_line):
+                
+                # Stop at footer patterns - don't collect these
+                is_footer = (
+                    cont_line.startswith('Dokument wygenerowany') or
+                    'VeloBank S.A.' in cont_line or
+                    'Saldo' in cont_line or
+                    re.match(r'^(DATA|KWOTA|OPIS|SALDO)', cont_line, re.IGNORECASE) or
+                    'Obciążenia' in cont_line or
+                    'Uznania' in cont_line or
+                    'Środki zgromadzone' in cont_line or
+                    'Bankowym Funduszu' in cont_line or
+                    'Funduszu Gwarancyjnym' in cont_line or
+                    'systemie gwarantowania' in cont_line or
+                    'Arkuszu Informacyjnym' in cont_line or
+                    'Sąd Rejonowy' in cont_line or
+                    'Nie wymaga podpisu' in cont_line or
+                    'www.bfg.pl' in cont_line or
+                    'w całości opłaconym' in cont_line or
+                    'Dz. U.' in cont_line or
+                    'Dz.U.' in cont_line or
+                    re.search(r'KRS \d+', cont_line) or
+                    re.search(r'NIP \d+', cont_line) or
+                    re.search(r'REGON \d+', cont_line) or
+                    re.search(r'kapitale.*zł', cont_line, re.IGNORECASE)
+                )
+                
+                if is_footer:
                     break
-
-                # Fallback: if we have a non-empty cont line that doesn't match any pattern,
-                # and we don't have a title yet, use it as title (e.g., "Automatyczna spłata karty kredytowe 5371656")
-                # Skip known footer/header patterns
-                if (not title and cont_line and 
-                    not cont_line.startswith('Dokument wygenerowany') and
-                    not 'VeloBank S.A.' in cont_line and
-                    not 'Saldo' in cont_line and
-                    not re.match(r'^(DATA|KWOTA|OPIS|SALDO)', cont_line, re.IGNORECASE)):
-                    title = cont_line
-
+                
+                # Collect this continuation line
+                continuation_lines.append(cont_line)
                 i += 1
+            
+            # Phase 2: Extract fields from collected text using keyword-based splitting
+            continuation_text = ' '.join(continuation_lines)
+            fields = _extract_fields_from_continuation_text(continuation_text)
+            
+            counterparty = fields['counterparty']
+            counterparty_iban = fields['counterparty_iban']
+            counterparty_address = fields['counterparty_address']
+            title = fields['title']
 
             # For card operations, extract merchant name as counterparty
             if not counterparty and description.startswith('Operacja kartą'):
                 counterparty, card_location = _extract_card_merchant(description)
+                if card_location and not counterparty_address:
+                    counterparty_address = card_location
 
             # Normalize counterparty - fix PDF line-break artifacts
             # "ZTM Dzial Ko ntroli Bi" -> "ZTM Dzial Kontroli Bi"
@@ -666,6 +737,7 @@ def _parse_new_format_continuation(
     lines: List[str],
     start_idx: int,
     max_lines: int = 10,
+    expect_counterparty_first: bool = False,
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Parse continuation lines in new format to extract IBAN, counterparty, and title.
     
@@ -673,6 +745,8 @@ def _parse_new_format_continuation(
         lines: All lines from the statement.
         start_idx: Index to start searching from (line after transaction).
         max_lines: Maximum number of lines to search.
+        expect_counterparty_first: If True, the main transaction line ended with "Odbiorca:"
+            or "Nadawca:", so the first continuation line is the counterparty name.
     
     Returns:
         Tuple of (counterparty_iban, counterparty_name, title).
@@ -683,16 +757,23 @@ def _parse_new_format_continuation(
     
     # Flags to track multi-line extraction
     expect_iban = False  # Next line after "Z rachunku:" might be IBAN
-    expect_counterparty = False  # Collecting counterparty name parts
+    expect_counterparty = expect_counterparty_first  # Collecting counterparty name parts
     counterparty_parts = []
+    
+    # For card operations: collect continuation lines to extract merchant info
+    card_continuation_text = []
     
     j = start_idx
     while j < len(lines) and j < start_idx + max_lines:
         line = lines[j].strip()
         
-        # Stop if we hit another transaction line (starts with date)
+        # Stop if we hit another transaction line (starts with date) - check BEFORE collecting
         if re.match(r'^\d{4}\.\d{2}\.\d{2}', line):
             break
+        
+        # Collect non-empty lines for card merchant extraction
+        if line:
+            card_continuation_text.append(line)
         
         # Skip page markers
         if 'Strona ' in line and ' z ' in line:
@@ -735,8 +816,11 @@ def _parse_new_format_continuation(
                     # Done collecting - join parts and extract name
                     if counterparty_parts:
                         full_text = ' '.join(counterparty_parts)
-                        # Take name before first double-comma or address indicator
-                        name_match = re.match(r'^([^,]+?)(?:,,|,\s*(?:UL|ul|Ul)\.|$)', full_text)
+                        # Take name before: double-comma, address indicator, www., postal code, or Tytułem
+                        name_match = re.match(
+                            r'^([^,]+?)(?:,,|,\s*(?:UL|ul|Ul)\.|\s+www\.|\s+\d{2}-\d{3}|\s+Tytułem|$)', 
+                            full_text
+                        )
                         if name_match:
                             counterparty_name = name_match.group(1).strip()
                         else:
@@ -759,7 +843,11 @@ def _parse_new_format_continuation(
     # Finalize counterparty if still collecting
     if expect_counterparty and counterparty_parts and not counterparty_name:
         full_text = ' '.join(counterparty_parts)
-        name_match = re.match(r'^([^,]+?)(?:,,|,\s*(?:UL|ul|Ul)\.|$)', full_text)
+        # Take name before: double-comma, address indicator, www., postal code, or Tytułem
+        name_match = re.match(
+            r'^([^,]+?)(?:,,|,\s*(?:UL|ul|Ul)\.|\s+www\.|\s+\d{2}-\d{3}|\s+Tytułem|$)', 
+            full_text
+        )
         if name_match:
             counterparty_name = name_match.group(1).strip()
         else:
@@ -767,7 +855,22 @@ def _parse_new_format_continuation(
         counterparty_name = re.sub(r' ([a-ząćęłńóśźż])', r'\1', counterparty_name)
         counterparty_name = re.sub(r'\s+', ' ', counterparty_name).strip()
     
-    return counterparty_iban, counterparty_name, title
+    # Extract card merchant from "PLN w MERCHANT, LOCATION" pattern
+    card_merchant = None
+    card_location = None
+    if card_continuation_text:
+        combined = ' '.join(card_continuation_text)
+        # Pattern: "20,00 PLN w APPLE.COM/BILL , CORK, IRL" or "... PLN w MERCHANT, CITY, COUNTRY"
+        card_match = re.search(r'PLN\s+w\s+(.+?)(?:\s*$)', combined, re.IGNORECASE)
+        if card_match:
+            card_full = card_match.group(1).strip()
+            # Split by comma - first is merchant, rest is location
+            parts = [p.strip() for p in card_full.split(',') if p.strip()]
+            if parts:
+                card_merchant = parts[0]
+                card_location = ', '.join(parts[1:]) if len(parts) > 1 else None
+    
+    return counterparty_iban, counterparty_name, title, card_merchant, card_location
 
 
 def _parse_new_format_transactions(
@@ -844,12 +947,21 @@ def _parse_new_format_transactions(
                     # Clean up description - extract just the type part
                     description = description.replace('|', ' ').strip()
                     description = re.sub(r'\s+', ' ', description)
+                    
+                    # Check if description ends with "Odbiorca:" or "Nadawca:" - counterparty on next line
+                    expects_counterparty = bool(re.search(r'(Odbiorca|Nadawca)[:\s]*$', description, re.IGNORECASE))
+                    
                     # Remove trailing "Z rachunku:" or "Na rachunek:" etc
                     description = re.sub(r'\s*(Z rachunku|Na rachunek|Odbiorca|Nadawca)[:\s]*$', '', description, flags=re.IGNORECASE)
                     
                     # Parse continuation lines for additional fields
-                    iban, counterparty, title = _parse_new_format_continuation(lines, i + 1)
-
+                    iban, counterparty, title, card_merchant, card_location = _parse_new_format_continuation(
+                        lines, i + 1, expect_counterparty_first=expects_counterparty)
+                    
+                    # For card operations, use card merchant info if available
+                    if description.startswith('Operacja kartą') and not counterparty and card_merchant:
+                        counterparty = card_merchant
+                    
                     raw_transactions.append({
                         'transaction_date': txn_date,
                         'booking_date': booking_date,
@@ -860,6 +972,8 @@ def _parse_new_format_transactions(
                         'counterparty_iban': iban,
                         'counterparty': counterparty,
                         'title': title,
+                        'card_merchant': card_merchant,
+                        'card_location': card_location,
                     })
                     is_valid_match = True
         
@@ -899,11 +1013,20 @@ def _parse_new_format_transactions(
                 # Clean up description - extract just the type part
                 description = description.replace('|', ' ').strip()
                 description = re.sub(r'\s+', ' ', description)
+                
+                # Check if description ends with "Odbiorca:" or "Nadawca:" - counterparty on next line
+                expects_counterparty = bool(re.search(r'(Odbiorca|Nadawca)[:\s]*$', description, re.IGNORECASE))
+                
                 # Remove trailing "Z rachunku:" or "Na rachunek:" etc
                 description = re.sub(r'\s*(Z rachunku|Na rachunek|Odbiorca|Nadawca)[:\s]*$', '', description, flags=re.IGNORECASE)
                 
                 # Parse continuation lines for additional fields (start from where we found description)
-                iban, counterparty, title = _parse_new_format_continuation(lines, j)
+                iban, counterparty, title, card_merchant, card_location = _parse_new_format_continuation(
+                    lines, j, expect_counterparty_first=expects_counterparty)
+                
+                # For card operations, use card merchant info if available
+                if description.startswith('Operacja kartą') and not counterparty and card_merchant:
+                    counterparty = card_merchant
                 
                 raw_transactions.append({
                     'transaction_date': txn_date,
@@ -915,6 +1038,8 @@ def _parse_new_format_transactions(
                     'counterparty_iban': iban,
                     'counterparty': counterparty,
                     'title': title,
+                    'card_merchant': card_merchant,
+                    'card_location': card_location,
                 })
         
         i += 1
@@ -948,9 +1073,13 @@ def _parse_new_format_transactions(
 
         # Get counterparty - from parsed data or extract from card operation
         counterparty = raw.get('counterparty')
-        counterparty_address = None
+        counterparty_address = raw.get('card_location')
+        
+        # For card operations without counterparty, try card_merchant first, then description extraction
         if not counterparty and raw['description'].startswith('Operacja kartą'):
-            counterparty, counterparty_address = _extract_card_merchant(raw['description'])
+            counterparty = raw.get('card_merchant')
+            if not counterparty:
+                counterparty, counterparty_address = _extract_card_merchant(raw['description'])
         
         # Normalize counterparty name if present
         if counterparty:
@@ -969,6 +1098,7 @@ def _parse_new_format_transactions(
             transaction_type=_extract_transaction_type(raw['description']),
             counterparty=counterparty,
             counterparty_iban=raw.get('counterparty_iban'),
+            counterparty_address=counterparty_address,
             title=raw.get('title') or raw['description'],
             card_number=_extract_card_number(raw['description']),
         ))
@@ -1770,7 +1900,18 @@ class VelobankSource(Source):
         amount = Amount(txn.amount, DEFAULT_CURRENCY)
 
         # Determine payee and narration (with English translation for type)
+        # Shorten payee by removing company type suffixes
         payee = txn.counterparty or 'VeloBank'
+        if txn.counterparty:
+            # Split at company type indicators and use first part
+            payee_match = re.split(
+                r'\s+(?:spółka|spolka|sp\s+|sp\.|s\.a\.)',
+                txn.counterparty,
+                maxsplit=1,
+                flags=re.IGNORECASE
+            )
+            if payee_match:
+                payee = payee_match[0].strip()
         
         # For narration: use title if available, otherwise use translated type
         if txn.title:
