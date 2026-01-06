@@ -404,6 +404,13 @@ def _extract_fields_from_continuation_text(text: str) -> dict:
     if title_match:
         result['title'] = title_match.group(1).strip()
     
+    # Fallback: if no keywords matched at all, use entire text as title
+    # This handles cases like "Automatyczna spłata karty kredytowe 5371656" 
+    # with no Z rachunku/Tytułem/Odbiorca keywords
+    if not any([result['counterparty_iban'], result['counterparty'], result['title']]):
+        if text and not re.search(r'(?:Z rachunku|Na rachunek|Prowadzon|Odbiorca|Nadawca|Tytułem|Tytuł)', text, re.IGNORECASE):
+            result['title'] = text
+    
     return result
 
 
