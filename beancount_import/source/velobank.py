@@ -123,7 +123,7 @@ TAX_SYMBOL_KEY = 'tax_symbol'  # Tax symbol (e.g., VAT-7K, PIT-28)
 TAX_PERIOD_KEY = 'tax_period'  # Settlement period (e.g., 24K01)
 TAX_OBLIGATION_KEY = 'tax_obligation'  # Obligation identification
 TAX_PAYER_KEY = 'tax_payer'  # Obligor/payer data
-SOURCE_DOC_KEY = 'source_doc'  # Link to source document file
+SOURCE_DOC_KEY = 'document'  # Link to source document file (clickable in fava)
 
 # Currency
 DEFAULT_CURRENCY = 'PLN'

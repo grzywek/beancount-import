@@ -83,7 +83,7 @@ COUNTERPARTY_BBAN_KEY = 'counterparty_bban'  # Counterparty BBAN (without countr
 ACCOUNT_IBAN_KEY = 'account_iban'  # Own account IBAN
 TITLE_KEY = 'title'  # Transaction title/remittance
 TRANSACTION_DATE_KEY = 'transaction_date'  # Value/transaction date (when money moved)
-SOURCE_DOC_KEY = 'source_doc'  # Link to source document file
+SOURCE_DOC_KEY = 'document'  # Link to source document file (clickable in fava)
 BOOKING_DATE_KEY = 'booking_date'  # Booking date (when bank recorded it)
 
 # Pattern to match files that already have a 4-digit suffix before extension

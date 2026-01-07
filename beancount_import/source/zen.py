@@ -92,7 +92,7 @@ CARD_NUMBER_KEY = 'card_number'  # Last 4 digits of card
 ORIGINAL_AMOUNT_KEY = 'original_amount'  # Original amount if different currency
 ORIGINAL_CURRENCY_KEY = 'original_currency'  # Original currency
 CURRENCY_RATE_KEY = 'currency_rate'  # Exchange rate
-SOURCE_DOC_KEY = 'source_doc'  # Link to source document file
+SOURCE_DOC_KEY = 'document'  # Link to source document file (clickable in fava)
 
 
 # Transaction types in Zen CSV
