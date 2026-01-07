@@ -709,6 +709,9 @@ class ZenSource(Source):
             # Find max transaction date from this statement
             max_date = max(txn.date for txn in statement.transactions)
             
+            # Use relative path from CWD (where run.py is executed)
+            relative_path = os.path.relpath(statement.filename)
+            
             results.add_pending_entry(
                 ImportResult(
                     date=max_date,
@@ -717,7 +720,7 @@ class ZenSource(Source):
                             meta=None,
                             date=max_date,
                             account=target_account,
-                            filename=statement.filename,  # Already has unique suffix
+                            filename=relative_path,
                             tags=EMPTY_SET,
                             links=EMPTY_SET,
                         )
