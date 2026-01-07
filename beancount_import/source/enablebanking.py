@@ -56,11 +56,12 @@ import datetime
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Tuple
 
-from beancount.core.data import Balance, Posting, Transaction, EMPTY_SET
+from beancount.core.data import Balance, Document, Posting, Transaction, EMPTY_SET
 from beancount.core.flags import FLAG_OKAY
 from beancount.core.number import D, ZERO
 from beancount.core.amount import Amount
@@ -82,7 +83,46 @@ COUNTERPARTY_BBAN_KEY = 'counterparty_bban'  # Counterparty BBAN (without countr
 ACCOUNT_IBAN_KEY = 'account_iban'  # Own account IBAN
 TITLE_KEY = 'title'  # Transaction title/remittance
 TRANSACTION_DATE_KEY = 'transaction_date'  # Value/transaction date (when money moved)
+SOURCE_DOC_KEY = 'source_doc'  # Link to source document file
 BOOKING_DATE_KEY = 'booking_date'  # Booking date (when bank recorded it)
+
+# Pattern to match files that already have a 4-digit suffix before extension
+SUFFIX_PATTERN = re.compile(r'-\d{4}(\.[^.]+)?$')
+
+
+def ensure_file_has_suffix(filepath: str) -> str:
+    """Ensure file has a 4-digit suffix, renaming it if needed.
+    
+    If the file doesn't have a suffix like '-1234', generate a random one
+    and physically rename the file on disk.
+    
+    Args:
+        filepath: Full path to the file.
+        
+    Returns:
+        The new filepath (with suffix) or original if already had one.
+    """
+    import random
+    
+    basename = os.path.basename(filepath)
+    
+    # Check if file already has a 4-digit suffix
+    if SUFFIX_PATTERN.search(basename):
+        return filepath  # Already has suffix
+    
+    # Generate new filename with suffix
+    base, ext = os.path.splitext(filepath)
+    suffix = random.randint(1000, 9999)
+    new_filepath = f"{base}-{suffix}{ext}"
+    
+    # Physically rename the file
+    try:
+        os.rename(filepath, new_filepath)
+        return new_filepath
+    except OSError as e:
+        # If rename fails (permissions, etc.), return original
+        print(f"Warning: could not rename {filepath} to {new_filepath}: {e}")
+        return filepath
 
 
 def _split_counterparty_address(name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -151,6 +191,7 @@ class EnableBankingTransaction:
     # Source info
     account_id: str
     bank: str
+    source_filename: str  # Relative path to source file (e.g., 'mbank/transactions_IBAN_PLN.json')
 
 
 def _parse_decimal(value: Optional[str]) -> Optional[Decimal]:
@@ -211,7 +252,7 @@ def _extract_address(postal_address: Optional[dict]) -> Optional[str]:
     return ', '.join(cleaned) if cleaned else None
 
 
-def _parse_transaction(txn_data: dict, account_id: str, bank: str) -> Optional[EnableBankingTransaction]:
+def _parse_transaction(txn_data: dict, account_id: str, bank: str, source_filename: str) -> Optional[EnableBankingTransaction]:
     """Parse a single transaction from JSON data."""
     entry_ref = txn_data.get('entry_reference')
     if not entry_ref:
@@ -299,6 +340,7 @@ def _parse_transaction(txn_data: dict, account_id: str, bank: str) -> Optional[E
         balance_after=balance_after,
         account_id=account_id,
         bank=bank,
+        source_filename=source_filename,
     )
 
 
@@ -436,8 +478,14 @@ class EnableBankingSource(Source):
                 actual_bank = acc.bank
                 break
         
+        # Ensure file has unique suffix, renaming if needed
+        path = ensure_file_has_suffix(path)
+        
+        # Store full path for Document directive
+        source_filename = path
+        
         for txn_data in data.get('transactions', []):
-            txn = _parse_transaction(txn_data, account_id, actual_bank)
+            txn = _parse_transaction(txn_data, account_id, actual_bank, source_filename)
             if txn:
                 self.transactions.append(txn)
 
@@ -602,6 +650,40 @@ class EnableBankingSource(Source):
                 results.add_invalid_reference(
                     InvalidSourceReference(len(postings), postings))
 
+        # Generate Document directives for source files
+        # Group transactions by (account_id, source_filename) to find max date per file
+        doc_groups: Dict[Tuple[str, str], datetime.date] = {}
+        for txn in self.transactions:
+            key = (txn.account_id, txn.source_filename)
+            if key not in doc_groups or txn.booking_date > doc_groups[key]:
+                doc_groups[key] = txn.booking_date
+        
+        # Generate Document directives for source files
+        # Files already have unique suffix from ensure_file_has_suffix during load
+        for (account_id, source_filename), max_date in doc_groups.items():
+            target_account = self._get_account_for_id(account_id)
+            if target_account is None:
+                continue
+            
+            results.add_pending_entry(
+                ImportResult(
+                    date=max_date,
+                    entries=[
+                        Document(
+                            meta=None,
+                            date=max_date,
+                            account=target_account,
+                            filename=source_filename,  # Already has unique suffix
+                            tags=EMPTY_SET,
+                            links=EMPTY_SET,
+                        )
+                    ],
+                    info=dict(
+                        type='application/json',
+                        filename=os.path.basename(source_filename),
+                    ),
+                ))
+
         # Register all accounts
         for account in all_accounts:
             results.add_account(account)
@@ -658,6 +740,9 @@ class EnableBankingSource(Source):
         # Add transaction_date if different from booking_date (as proper date object for matching)
         if txn.transaction_date and txn.transaction_date != txn.booking_date:
             meta[TRANSACTION_DATE_KEY] = txn.transaction_date  # datetime.date, not string!
+        
+        # Add link to source document (only filename, not full path)
+        meta[SOURCE_DOC_KEY] = os.path.basename(txn.source_filename)
         
         # Note: transaction_type and title are set later after rules are applied
 

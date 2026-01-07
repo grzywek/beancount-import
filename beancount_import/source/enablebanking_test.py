@@ -57,7 +57,7 @@ class TestParseTransaction:
             "remittance_information": ["Test payment"],
         }
         
-        txn = _parse_transaction(txn_data, "PL123_PLN", "mBank")
+        txn = _parse_transaction(txn_data, "PL123_PLN", "mBank", "mbank/transactions_PL123_PLN.json")
         
         assert txn is not None
         assert txn.entry_reference == "202512281122"
@@ -82,7 +82,7 @@ class TestParseTransaction:
             "remittance_information": ["Salary"],
         }
         
-        txn = _parse_transaction(txn_data, "PL456_PLN", "Pekao")
+        txn = _parse_transaction(txn_data, "PL456_PLN", "Pekao", "pekao/transactions_PL456_PLN.json")
         
         assert txn is not None
         assert txn.amount == Decimal("500.00")  # CRDT = positive
@@ -95,7 +95,7 @@ class TestParseTransaction:
             "booking_date": "2025-01-01",
         }
         
-        assert _parse_transaction(txn_data, "PL123_PLN", "bank") is None
+        assert _parse_transaction(txn_data, "PL123_PLN", "bank", "test.json") is None
     
     def test_bank_transaction_code(self):
         txn_data = {
@@ -108,7 +108,7 @@ class TestParseTransaction:
             },
         }
         
-        txn = _parse_transaction(txn_data, "PL123_PLN", "Revolut")
+        txn = _parse_transaction(txn_data, "PL123_PLN", "Revolut", "revolut/transactions_PL123_PLN.json")
         
         assert txn is not None
         assert txn.bank_transaction_code == "CARD_PAYMENT"
@@ -127,13 +127,16 @@ class TestGenerateTransactionId:
             status="BOOK",
             creditor_name=None,
             creditor_iban=None,
+            creditor_address=None,
             debtor_name=None,
             debtor_iban=None,
+            debtor_address=None,
             remittance_information=[],
             bank_transaction_code=None,
             balance_after=None,
             account_id="PL123_PLN",
             bank="mBank",
+            source_filename="mbank/transactions_PL123_PLN.json",
         )
         
         result = _generate_transaction_id(txn)
@@ -198,11 +201,11 @@ class TestEnableBankingSource:
         """Test that source requires account_map or default_account."""
         with tempfile.TemporaryDirectory() as tmpdir:
             with pytest.raises(ValueError, match="requires either"):
-                EnableBankingSource(data_directory=tmpdir, log_status=lambda x: None)
+                EnableBankingSource(directory=tmpdir, log_status=lambda x: None)
     
     def test_loads_accounts(self, test_data_dir):
         source = EnableBankingSource(
-            data_directory=test_data_dir,
+            directory=test_data_dir,
             default_account="Assets:Bank",
             log_status=lambda x: None,
         )
@@ -213,7 +216,7 @@ class TestEnableBankingSource:
     
     def test_loads_transactions(self, test_data_dir):
         source = EnableBankingSource(
-            data_directory=test_data_dir,
+            directory=test_data_dir,
             default_account="Assets:Bank",
             log_status=lambda x: None,
         )
@@ -230,7 +233,7 @@ class TestEnableBankingSource:
     
     def test_account_map(self, test_data_dir):
         source = EnableBankingSource(
-            data_directory=test_data_dir,
+            directory=test_data_dir,
             account_map={
                 "PL11111111111111111111111111_PLN": "Assets:mBank:Checking",
             },
@@ -248,7 +251,7 @@ class TestEnableBankingSource:
     
     def test_make_transaction_debit(self, test_data_dir):
         source = EnableBankingSource(
-            data_directory=test_data_dir,
+            directory=test_data_dir,
             default_account="Assets:Bank",
             log_status=lambda x: None,
         )
@@ -270,7 +273,7 @@ class TestEnableBankingSource:
     
     def test_make_transaction_credit(self, test_data_dir):
         source = EnableBankingSource(
-            data_directory=test_data_dir,
+            directory=test_data_dir,
             default_account="Assets:Bank",
             log_status=lambda x: None,
         )

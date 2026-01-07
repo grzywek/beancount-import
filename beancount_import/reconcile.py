@@ -10,7 +10,7 @@ import string
 import random
 import pickle
 
-from beancount.core.data import Transaction, Posting, Balance, Open, Close, Price, Commodity, Directive, Entries, Amount
+from beancount.core.data import Transaction, Posting, Balance, Open, Close, Price, Commodity, Document, Directive, Entries, Amount
 from beancount.core.flags import FLAG_PADDING
 from beancount.core.number import MISSING, Decimal, ZERO
 import beancount.parser.printer
@@ -271,7 +271,7 @@ def get_filename_from_map(account_map: List[Tuple[str, str]], account_name: str,
 
 class EntryFileSelector(object):
     def __init__(self, default_map, open_map, balance_map, price_output,
-                 commodity_output, default_output):
+                 commodity_output, document_output, default_output):
         self.default_map = default_map
         self.open_map = open_map
         self.balance_map = balance_map
@@ -282,6 +282,9 @@ class EntryFileSelector(object):
         if commodity_output is None:
             commodity_output = default_output
         self.commodity_output = commodity_output
+        if document_output is None:
+            document_output = default_output
+        self.document_output = document_output
 
     def __call__(self, entry):
         if isinstance(entry, Open) or isinstance(entry, Close):
@@ -301,6 +304,8 @@ class EntryFileSelector(object):
             return self.price_output
         if isinstance(entry, Commodity):
             return self.commodity_output
+        if isinstance(entry, Document):
+            return self.document_output
         return self.default_output
 
     @staticmethod
@@ -309,6 +314,7 @@ class EntryFileSelector(object):
             default_map=options['transaction_output_map'],
             price_output=options['price_output'],
             commodity_output=options.get('commodity_output'),
+            document_output=options.get('document_output'),
             open_map=options['open_account_output_map'],
             default_output=options['default_output'],
             balance_map=options['balance_account_output_map'])
@@ -326,6 +332,9 @@ def get_entry_file_selector_argparser(kwargs):
     ap.add_argument(
         '--commodity_output',
         help='Beancount output file to which commodity entries will be appended')
+    ap.add_argument(
+        '--document_output',
+        help='Beancount output file to which document entries will be appended')
     ap.add_argument(
         '--open_account_output_map',
         help='Beancount output file to which matching accounts will be appended',
@@ -703,6 +712,10 @@ class LoadedReconciler(object):
                     if entry.currency in self.editor.commodities:
                         continue
                     # Don't add to posting_db, but treat as individual entry
+                    only_balance_or_price = False
+                elif isinstance(entry, Document):
+                    # Document entries should be individual entries (not grouped with balance/price)
+                    # They don't go through matching, just get added individually
                     only_balance_or_price = False
                 else:
                     pending_transaction_ids.add(id(entry))
