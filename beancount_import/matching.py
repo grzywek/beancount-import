@@ -507,7 +507,35 @@ TRANSACTION_POSTING_COUNT_KEYS = [
     NUM_UNCLEARED_POSTING_MATCHES_KEY,
     NUM_UNKNOWN_POSTINGS_REMOVED_KEY,
 ]
-IGNORED_META_KEYS_FOR_MATCHING = frozenset(['lineno', 'filename'])
+
+# Metadata keys to ignore when checking if two postings can be merged.
+# These keys are expected to differ between banks/sources for the same transaction.
+IGNORED_META_KEYS_FOR_MATCHING = frozenset([
+    'lineno',
+    'filename',
+    # Bank/source identification - will always differ between sources
+    'source_bank',
+    'source_ref',
+    'document',
+    'account_iban',
+    'account_bban',
+    # Counterparty info - may differ in format/spelling between banks
+    'counterparty',
+    'counterparty_address',
+    'counterparty_iban',
+    'counterparty_bban',
+    # Transaction type - different terminology per bank
+    'transaction_type',
+    # Title/description - different format per bank
+    'title',
+    # Dates - booking vs transaction date may differ
+    'booking_date',
+    'transaction_date',
+    # Other bank-specific metadata
+    'currency_rate',
+    'original_amount',
+    'original_currency',
+])
 
 TRANSACTION_TEMP_METADATA_KEYS = TRANSACTION_POSTING_COUNT_KEYS
 
