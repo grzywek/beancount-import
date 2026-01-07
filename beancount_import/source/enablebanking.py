@@ -665,9 +665,7 @@ class EnableBankingSource(Source):
             if target_account is None:
                 continue
             
-            # Use relative path from CWD (where run.py is executed)
-            relative_path = os.path.relpath(source_filename)
-            
+            # Use absolute path - SourceResults will convert to relative if needed
             results.add_pending_entry(
                 ImportResult(
                     date=max_date,
@@ -676,7 +674,7 @@ class EnableBankingSource(Source):
                             meta=None,
                             date=max_date,
                             account=target_account,
-                            filename=relative_path,
+                            filename=source_filename,  # Absolute path
                             tags=EMPTY_SET,
                             links=EMPTY_SET,
                         )

@@ -547,7 +547,13 @@ class LoadedReconciler(object):
                 earliest_transaction = None
         
         for source in self.sources:
-            source_results = SourceResults(earliest_transaction=earliest_transaction)
+            # Get document_output directory for relative path calculation
+            document_output = self.reconciler.options.get('document_output')
+            document_output_dir = os.path.dirname(document_output) if document_output else None
+            source_results = SourceResults(
+                earliest_transaction=earliest_transaction,
+                document_output_dir=document_output_dir
+            )
             self.reconciler.log_status(f'preparing source {source.name}')
             source.prepare(self.editor, source_results)
             for account in source_results.accounts:

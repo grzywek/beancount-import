@@ -118,7 +118,8 @@ def invalid_source_reference_sort_key(
 
 
 class SourceResults:
-    def __init__(self, earliest_transaction: Optional[datetime.date] = None):
+    def __init__(self, earliest_transaction: Optional[datetime.date] = None,
+                 document_output_dir: Optional[str] = None):
         self.pending = []  # type: List[ImportResult]
         self.accounts = set()  # type: Set[str]
         self.skip_training_accounts = set() # type: Set[str]
@@ -127,14 +128,31 @@ class SourceResults:
         self.seen_messages = set(
         )  # type: Set[Tuple[str, str, FrozenSet[Tuple[str, Any]]]]
         self.earliest_transaction = earliest_transaction
+        self.document_output_dir = document_output_dir
 
     def add_pending_entry(self, entry: ImportResult):
         """Adds a generated ImportResult.
         
         If earliest_transaction is set, entries with dates before it are skipped.
+        For Document entries, converts filename to path relative to document_output_dir.
         """
+        import os
+        from beancount.core.data import Document
+        
         if self.earliest_transaction and entry.date < self.earliest_transaction:
             return  # Skip entries before earliest_transaction
+        
+        # Convert Document filenames to relative paths from document_output_dir
+        if self.document_output_dir:
+            new_entries = []
+            for e in entry.entries:
+                if isinstance(e, Document) and os.path.isabs(e.filename):
+                    # Compute relative path from document_output_dir
+                    relative_path = os.path.relpath(e.filename, self.document_output_dir)
+                    e = e._replace(filename=relative_path)
+                new_entries.append(e)
+            entry = entry._replace(entries=new_entries)
+        
         self.pending.append(entry)
 
     def add_pending_entries(self, entries: Iterable[ImportResult]):
