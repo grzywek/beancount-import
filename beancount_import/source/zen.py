@@ -622,13 +622,17 @@ class ZenSource(Source):
             targets = [(s, t) for s, t in group if t.settlement_amount > ZERO]
             
             for src_stmt, src_txn in sources:
-                src_key = (src_stmt.iban, src_stmt.currency, src_txn.line_number)
+                # Unique key based on transaction data (stable regardless of file/line changes)
+                # Format: (iban, date, settlement_amount, balance_after, currency)
+                src_key = (src_stmt.iban, src_txn.date, src_txn.settlement_amount, 
+                           src_txn.balance_after, src_stmt.currency)
                 if src_key in matched_source:
                     continue
                     
                 # Find matching target
                 for tgt_stmt, tgt_txn in targets:
-                    tgt_key = (tgt_stmt.iban, tgt_stmt.currency, tgt_txn.line_number)
+                    tgt_key = (tgt_stmt.iban, tgt_txn.date, tgt_txn.settlement_amount,
+                               tgt_txn.balance_after, tgt_stmt.currency)
                     if tgt_key in matched_target:
                         continue
                     
@@ -767,7 +771,10 @@ class ZenSource(Source):
         # Process remaining (non-paired) transactions
         for statement, txn in self.transactions:
             # Skip if this transaction is part of an FX pair
-            txn_key = (statement.iban, statement.currency, txn.line_number)
+            # Key must match the format used in _find_fx_pairs:
+            # (iban, date, settlement_amount, balance_after, currency)
+            txn_key = (statement.iban, txn.date, txn.settlement_amount,
+                       txn.balance_after, statement.currency)
             if txn_key in paired_keys:
                 continue
                 
