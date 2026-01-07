@@ -146,9 +146,11 @@ class SourceResults:
         if self.document_output_dir:
             new_entries = []
             for e in entry.entries:
-                if isinstance(e, Document) and os.path.isabs(e.filename):
+                if isinstance(e, Document):
+                    # Convert to absolute path first if not already
+                    abs_path = e.filename if os.path.isabs(e.filename) else os.path.abspath(e.filename)
                     # Compute relative path from document_output_dir
-                    relative_path = os.path.relpath(e.filename, self.document_output_dir)
+                    relative_path = os.path.relpath(abs_path, self.document_output_dir)
                     e = e._replace(filename=relative_path)
                 new_entries.append(e)
             entry = entry._replace(entries=new_entries)
