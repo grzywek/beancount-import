@@ -189,8 +189,14 @@ BothSignMatchGroups = Tuple[SingleSignMatchGroups, SingleSignMatchGroups]
 
 
 def is_unknown_account(account: str):
-    return account == FIXME_ACCOUNT or account.startswith(
-        MERGEABLE_FIXME_ACCOUNT_PREFIX)
+    # Recognize any account ending with :FIXME or starting with FIXME:
+    # e.g., Assets:FIXME, Expenses:FIXME, Expenses:FIXME:Something
+    if account is None:
+        return False
+    return (account == FIXME_ACCOUNT or 
+            account.startswith(MERGEABLE_FIXME_ACCOUNT_PREFIX) or
+            account.endswith(':FIXME') or
+            ':FIXME:' in account)
 
 
 def get_posting_weight(posting: Posting) -> Optional[Amount]:
