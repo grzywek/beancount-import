@@ -300,5 +300,232 @@ This is a computer-generated document.
             assert source.is_posting_cleared(uncleared_posting) is False
 
 
+class TestFxPairing:
+    """Test FX transaction pairing logic."""
+
+    def test_fx_pair_detection(self):
+        """Test that FX pairs are correctly detected from matching transactions."""
+        # Create two CSV files with matching FX transactions
+        pln_csv = """PLN monthly statement
+Generated: 6 Jan 2026
+Date: 1 Mar 2025 - 31 Mar 2025
+
+Account owner
+TEST USER
+
+Account details
+Global IBAN: GB72TCCL04140411776433
+Currency: PLN
+
+Opening balance:,100.00,PLN
+Closing balance:,71.86,PLN
+
+
+Transactions:
+Date,Transaction type,Description,Settlement amount,Settlement currency,Original amount,Original currency,Currency rate,Fee description,Fee amount,Fee currency,Balance
+9 Mar 2025,Exchange money,Currency exchange transaction,-28.14,PLN,-6.74,EUR,0.239517,Fee for processing transaction,,,71.86
+
+This is a computer-generated document.
+"""
+        eur_csv = """EUR monthly statement
+Generated: 6 Jan 2026
+Date: 1 Mar 2025 - 31 Mar 2025
+
+Account owner
+TEST USER
+
+Account details
+Global IBAN: GB72TCCL04140411776433
+Currency: EUR
+
+Opening balance:,0.00,EUR
+Closing balance:,6.74,EUR
+
+
+Transactions:
+Date,Transaction type,Description,Settlement amount,Settlement currency,Original amount,Original currency,Currency rate,Fee description,Fee amount,Fee currency,Balance
+9 Mar 2025,Exchange money,Currency exchange transaction,6.74,EUR,28.14,PLN,0.239517,Fee for processing transaction,,,6.74
+
+This is a computer-generated document.
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            year_dir = os.path.join(tmpdir, "2025")
+            os.makedirs(year_dir)
+            
+            with open(os.path.join(year_dir, "2025-03-PLN-1234.csv"), 'w', encoding='utf-8') as f:
+                f.write(pln_csv)
+            with open(os.path.join(year_dir, "2025-03-EUR-5678.csv"), 'w', encoding='utf-8') as f:
+                f.write(eur_csv)
+            
+            source = zen.ZenSource(
+                directory=tmpdir,
+                account_map={
+                    'GB72TCCL04140411776433_PLN': 'Assets:Zen:PLN',
+                    'GB72TCCL04140411776433_EUR': 'Assets:Zen:EUR',
+                },
+                log_status=lambda x: None,
+            )
+            
+            pairs, src_keys, tgt_keys = source._find_fx_pairs()
+            
+            assert len(pairs) == 1
+            pair = pairs[0]
+            assert pair.date == datetime.date(2025, 3, 9)
+            assert pair.source_txn.settlement_amount == Decimal("-28.14")
+            assert pair.target_txn.settlement_amount == Decimal("6.74")
+            assert pair.is_reversal is False
+
+    def test_fx_transaction_narration(self):
+        """Test that FX transactions have correct narration format."""
+        pln_csv = """PLN monthly statement
+Generated: 6 Jan 2026
+Date: 1 Mar 2025 - 31 Mar 2025
+
+Account owner
+TEST USER
+
+Account details
+Global IBAN: GB72TCCL04140411776433
+Currency: PLN
+
+Opening balance:,100.00,PLN
+Closing balance:,71.86,PLN
+
+
+Transactions:
+Date,Transaction type,Description,Settlement amount,Settlement currency,Original amount,Original currency,Currency rate,Fee description,Fee amount,Fee currency,Balance
+9 Mar 2025,Exchange money,Currency exchange transaction,-28.14,PLN,-6.74,EUR,0.239517,Fee for processing transaction,,,71.86
+
+This is a computer-generated document.
+"""
+        eur_csv = """EUR monthly statement
+Generated: 6 Jan 2026
+Date: 1 Mar 2025 - 31 Mar 2025
+
+Account owner
+TEST USER
+
+Account details
+Global IBAN: GB72TCCL04140411776433
+Currency: EUR
+
+Opening balance:,0.00,EUR
+Closing balance:,6.74,EUR
+
+
+Transactions:
+Date,Transaction type,Description,Settlement amount,Settlement currency,Original amount,Original currency,Currency rate,Fee description,Fee amount,Fee currency,Balance
+9 Mar 2025,Exchange money,Currency exchange transaction,6.74,EUR,28.14,PLN,0.239517,Fee for processing transaction,,,6.74
+
+This is a computer-generated document.
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            year_dir = os.path.join(tmpdir, "2025")
+            os.makedirs(year_dir)
+            
+            with open(os.path.join(year_dir, "2025-03-PLN-1234.csv"), 'w', encoding='utf-8') as f:
+                f.write(pln_csv)
+            with open(os.path.join(year_dir, "2025-03-EUR-5678.csv"), 'w', encoding='utf-8') as f:
+                f.write(eur_csv)
+            
+            source = zen.ZenSource(
+                directory=tmpdir,
+                account_map={
+                    'GB72TCCL04140411776433_PLN': 'Assets:Zen:PLN',
+                    'GB72TCCL04140411776433_EUR': 'Assets:Zen:EUR',
+                },
+                log_status=lambda x: None,
+            )
+            
+            pairs, _, _ = source._find_fx_pairs()
+            pair = pairs[0]
+            
+            txn = source._make_fx_transaction(pair, 'Assets:Zen:PLN', 'Assets:Zen:EUR')
+            
+            assert txn.narration == "FX - PLN → EUR"
+            assert txn.payee == "Zen"
+
+    def test_fx_per_unit_price(self):
+        """Test that FX transactions have correct per-unit price calculation."""
+        pln_csv = """PLN monthly statement
+Generated: 6 Jan 2026
+Date: 1 Mar 2025 - 31 Mar 2025
+
+Account owner
+TEST USER
+
+Account details
+Global IBAN: GB72TCCL04140411776433
+Currency: PLN
+
+Opening balance:,100.00,PLN
+Closing balance:,71.86,PLN
+
+
+Transactions:
+Date,Transaction type,Description,Settlement amount,Settlement currency,Original amount,Original currency,Currency rate,Fee description,Fee amount,Fee currency,Balance
+9 Mar 2025,Exchange money,Currency exchange transaction,-28.14,PLN,-6.74,EUR,0.239517,Fee for processing transaction,,,71.86
+
+This is a computer-generated document.
+"""
+        eur_csv = """EUR monthly statement
+Generated: 6 Jan 2026
+Date: 1 Mar 2025 - 31 Mar 2025
+
+Account owner
+TEST USER
+
+Account details
+Global IBAN: GB72TCCL04140411776433
+Currency: EUR
+
+Opening balance:,0.00,EUR
+Closing balance:,6.74,EUR
+
+
+Transactions:
+Date,Transaction type,Description,Settlement amount,Settlement currency,Original amount,Original currency,Currency rate,Fee description,Fee amount,Fee currency,Balance
+9 Mar 2025,Exchange money,Currency exchange transaction,6.74,EUR,28.14,PLN,0.239517,Fee for processing transaction,,,6.74
+
+This is a computer-generated document.
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            year_dir = os.path.join(tmpdir, "2025")
+            os.makedirs(year_dir)
+            
+            with open(os.path.join(year_dir, "2025-03-PLN-1234.csv"), 'w', encoding='utf-8') as f:
+                f.write(pln_csv)
+            with open(os.path.join(year_dir, "2025-03-EUR-5678.csv"), 'w', encoding='utf-8') as f:
+                f.write(eur_csv)
+            
+            source = zen.ZenSource(
+                directory=tmpdir,
+                account_map={
+                    'GB72TCCL04140411776433_PLN': 'Assets:Zen:PLN',
+                    'GB72TCCL04140411776433_EUR': 'Assets:Zen:EUR',
+                },
+                log_status=lambda x: None,
+            )
+            
+            pairs, _, _ = source._find_fx_pairs()
+            pair = pairs[0]
+            
+            txn = source._make_fx_transaction(pair, 'Assets:Zen:PLN', 'Assets:Zen:EUR')
+            
+            # First posting: source (PLN debit)
+            assert txn.postings[0].units.number == Decimal("-28.14")
+            assert txn.postings[0].units.currency == "PLN"
+            assert txn.postings[0].price is None
+            
+            # Second posting: target (EUR credit) with per-unit price
+            assert txn.postings[1].units.number == Decimal("6.74")
+            assert txn.postings[1].units.currency == "EUR"
+            assert txn.postings[1].price is not None
+            assert txn.postings[1].price.currency == "PLN"
+            # Per-unit price should be 28.14 / 6.74 ≈ 4.175...
+            expected_per_unit = Decimal("28.14") / Decimal("6.74")
+            assert abs(txn.postings[1].price.number - expected_per_unit) < Decimal("0.0001")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

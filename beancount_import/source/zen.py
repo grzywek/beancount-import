@@ -305,6 +305,24 @@ class StatementInfo:
     transactions: List[ZenTransaction] = field(default_factory=list)
 
 
+@dataclass
+class FxPair:
+    """A matched pair of FX transactions from different currency accounts.
+    
+    When exchanging PLN to EUR, Zen creates two entries:
+    - PLN file: debit of -28.14 PLN (settlement), original -6.74 EUR
+    - EUR file: credit of +6.74 EUR (settlement), original 28.14 PLN
+    
+    This class pairs them for generating a single Beancount transaction.
+    """
+    date: datetime.date
+    source_statement: StatementInfo  # Statement for the debit (outgoing) side
+    source_txn: ZenTransaction       # The debit transaction (negative settlement_amount)
+    target_statement: StatementInfo  # Statement for the credit (incoming) side
+    target_txn: ZenTransaction       # The credit transaction (positive settlement_amount)
+    is_reversal: bool = False        # True if description contains "reversal"
+
+
 def parse_csv(path: str) -> Optional[StatementInfo]:
     """Parse a Zen CSV statement file.
     
@@ -561,6 +579,84 @@ class ZenSource(Source):
             accounts.add(self.default_account)
         return accounts
 
+    def _find_fx_pairs(self) -> Tuple[List[FxPair], set, set]:
+        """Find matching FX transaction pairs across all statements.
+        
+        When exchanging PLN to EUR, Zen creates two entries:
+        - PLN file: debit of -28.14 PLN (settlement), original -6.74 EUR
+        - EUR file: credit of +6.74 EUR (settlement), original 28.14 PLN
+        
+        This method finds these pairs by matching:
+        - Same date
+        - Same currency_rate
+        - |source.settlement_amount| == |target.original_amount|
+        - |source.original_amount| == |target.settlement_amount|
+        
+        Returns:
+            Tuple of:
+            - List of matched FxPair objects
+            - Set of (iban, currency, line_number) tuples for matched source txns
+            - Set of (iban, currency, line_number) tuples for matched target txns
+        """
+        pairs: List[FxPair] = []
+        matched_source: set = set()
+        matched_target: set = set()
+        
+        # Collect all FX transactions
+        fx_transactions: List[Tuple[StatementInfo, ZenTransaction]] = []
+        for statement, txn in self.transactions:
+            if txn.transaction_type == 'Exchange money':
+                fx_transactions.append((statement, txn))
+        
+        # Group by date and rate for efficient matching
+        # Key: (date, currency_rate) -> list of (statement, txn, is_source)
+        by_date_rate: Dict[Tuple[datetime.date, Decimal], List[Tuple[StatementInfo, ZenTransaction]]] = {}
+        for statement, txn in fx_transactions:
+            key = (txn.date, txn.currency_rate)
+            by_date_rate.setdefault(key, []).append((statement, txn))
+        
+        # Match within each group
+        for (date, rate), group in by_date_rate.items():
+            # Split into potential sources (negative settlement) and targets (positive settlement)
+            sources = [(s, t) for s, t in group if t.settlement_amount < ZERO]
+            targets = [(s, t) for s, t in group if t.settlement_amount > ZERO]
+            
+            for src_stmt, src_txn in sources:
+                src_key = (src_stmt.iban, src_stmt.currency, src_txn.line_number)
+                if src_key in matched_source:
+                    continue
+                    
+                # Find matching target
+                for tgt_stmt, tgt_txn in targets:
+                    tgt_key = (tgt_stmt.iban, tgt_stmt.currency, tgt_txn.line_number)
+                    if tgt_key in matched_target:
+                        continue
+                    
+                    # Check amount symmetry:
+                    # source.settlement_amount should equal -target.original_amount
+                    # source.original_amount should equal -target.settlement_amount
+                    if (abs(src_txn.settlement_amount) == abs(tgt_txn.original_amount) and
+                        abs(src_txn.original_amount) == abs(tgt_txn.settlement_amount) and
+                        src_stmt.currency != tgt_stmt.currency):  # Must be different currencies
+                        
+                        # Check if this is a reversal
+                        is_reversal = 'reversal' in src_txn.description.lower()
+                        
+                        pair = FxPair(
+                            date=date,
+                            source_statement=src_stmt,
+                            source_txn=src_txn,
+                            target_statement=tgt_stmt,
+                            target_txn=tgt_txn,
+                            is_reversal=is_reversal,
+                        )
+                        pairs.append(pair)
+                        matched_source.add(src_key)
+                        matched_target.add(tgt_key)
+                        break
+        
+        return pairs, matched_source, matched_target
+
     def get_example_key_value_pairs(
         self,
         transaction: Transaction,
@@ -614,9 +710,67 @@ class ZenSource(Source):
         # Track for balance assertions
         balances_by_account: Dict[str, List[Tuple[datetime.date, Decimal, str]]] = {}
         
-        # Process all transactions
+        # Find FX pairs first
+        fx_pairs, paired_source_keys, paired_target_keys = self._find_fx_pairs()
+        paired_keys = paired_source_keys | paired_target_keys
+        
+        # Track all valid IDs
         valid_ids = set()
+        
+        # Process FX pairs
+        for pair in fx_pairs:
+            src_account_id = f"{pair.source_statement.iban}_{pair.source_statement.currency}"
+            tgt_account_id = f"{pair.target_statement.iban}_{pair.target_statement.currency}"
+            
+            src_txn_id = _generate_transaction_id(pair.source_statement.iban, pair.source_txn)
+            tgt_txn_id = _generate_transaction_id(pair.target_statement.iban, pair.target_txn)
+            valid_ids.add(src_txn_id)
+            valid_ids.add(tgt_txn_id)
+            
+            # Check if already matched (both IDs must be unmatched for a new entry)
+            src_existing = matched_ids.get(src_txn_id)
+            tgt_existing = matched_ids.get(tgt_txn_id)
+            
+            if src_existing is not None or tgt_existing is not None:
+                # FX pair already exists in journal
+                for existing in [src_existing, tgt_existing]:
+                    if existing and len(existing) > 1:
+                        results.add_invalid_reference(
+                            InvalidSourceReference(len(existing) - 1, existing))
+            else:
+                # Create new FX transaction
+                src_account = self._get_account_for_id(src_account_id)
+                tgt_account = self._get_account_for_id(tgt_account_id)
+                
+                if src_account and tgt_account:
+                    fx_txn = self._make_fx_transaction(pair, src_account, tgt_account)
+                    results.add_pending_entry(
+                        ImportResult(
+                            date=pair.date,
+                            entries=[fx_txn],
+                            info=get_info(pair.source_statement.filename),
+                        ))
+            
+            # Track balances for assertions (both sides of the FX)
+            src_account = self._get_account_for_id(src_account_id)
+            if src_account:
+                balances_by_account.setdefault(src_account, []).append(
+                    (pair.source_txn.date, pair.source_txn.balance_after, pair.source_txn.settlement_currency)
+                )
+            
+            tgt_account = self._get_account_for_id(tgt_account_id)
+            if tgt_account:
+                balances_by_account.setdefault(tgt_account, []).append(
+                    (pair.target_txn.date, pair.target_txn.balance_after, pair.target_txn.settlement_currency)
+                )
+        
+        # Process remaining (non-paired) transactions
         for statement, txn in self.transactions:
+            # Skip if this transaction is part of an FX pair
+            txn_key = (statement.iban, statement.currency, txn.line_number)
+            if txn_key in paired_keys:
+                continue
+                
             account_id = f"{statement.iban}_{statement.currency}"
             txn_id = _generate_transaction_id(statement.iban, txn)
             valid_ids.add(txn_id)
@@ -732,6 +886,105 @@ class ZenSource(Source):
         # Register all accounts
         for account in all_accounts:
             results.add_account(account)
+
+    def _make_fx_transaction(
+        self,
+        pair: FxPair,
+        source_account: str,
+        target_account: str,
+    ) -> Transaction:
+        """Create a single Beancount Transaction from paired FX transactions.
+        
+        Generates a transaction like:
+            2025-03-09 * "Zen" "FX - PLN → EUR"
+              Assets:Zen:PLN   -28.14 PLN
+              Assets:Zen:EUR    6.74 EUR @@ 28.14 PLN
+        
+        Args:
+            pair: The matched FX pair.
+            source_account: Beancount account for the source (debit) side.
+            target_account: Beancount account for the target (credit) side.
+            
+        Returns:
+            A Beancount Transaction with two postings.
+        """
+        src_txn = pair.source_txn
+        tgt_txn = pair.target_txn
+        
+        # Generate transaction IDs for both sides
+        src_txn_id = _generate_transaction_id(pair.source_statement.iban, src_txn)
+        tgt_txn_id = _generate_transaction_id(pair.target_statement.iban, tgt_txn)
+        
+        # Build metadata for source posting
+        src_meta = collections.OrderedDict([
+            (SOURCE_REF_KEY, src_txn_id),
+            (SOURCE_BANK_KEY, 'Zen'),
+            (ACCOUNT_IBAN_KEY, pair.source_statement.iban),
+            (TRANSACTION_TYPE_KEY, 'Exchange money'),
+            (CURRENCY_RATE_KEY, str(src_txn.currency_rate)),
+            (SOURCE_DOC_KEY, os.path.basename(pair.source_statement.filename)),
+        ])
+        
+        # Build metadata for target posting  
+        tgt_meta = collections.OrderedDict([
+            (SOURCE_REF_KEY, tgt_txn_id),
+            (SOURCE_BANK_KEY, 'Zen'),
+            (ACCOUNT_IBAN_KEY, pair.target_statement.iban),
+            (TRANSACTION_TYPE_KEY, 'Exchange money'),
+            (SOURCE_DOC_KEY, os.path.basename(pair.target_statement.filename)),
+        ])
+        
+        # Build narration: "FX - PLN → EUR" or "FX reversal - PLN → EUR"
+        src_currency = pair.source_statement.currency
+        tgt_currency = pair.target_statement.currency
+        if pair.is_reversal:
+            narration = f"FX reversal - {src_currency} → {tgt_currency}"
+        else:
+            narration = f"FX - {src_currency} → {tgt_currency}"
+        
+        # Create postings
+        # Source: negative amount in source currency (no price)
+        src_amount = Amount(src_txn.settlement_amount, src_txn.settlement_currency)
+        
+        # Target: positive amount in target currency with PER-UNIT price in source currency
+        # Beancount API uses @ (per-unit), not @@ (total). We calculate per-unit from total.
+        # total_price = |src_settlement_amount| (e.g., 28.14 PLN)
+        # quantity = tgt_settlement_amount (e.g., 6.74 EUR)
+        # per_unit_price = total_price / quantity (e.g., 28.14 / 6.74 = 4.175... PLN/EUR)
+        tgt_amount = Amount(tgt_txn.settlement_amount, tgt_txn.settlement_currency)
+        
+        total_price_value = abs(src_txn.settlement_amount)
+        quantity = tgt_txn.settlement_amount
+        per_unit_price = total_price_value / quantity
+        price_per_unit = Amount(per_unit_price, src_txn.settlement_currency)
+        
+        return Transaction(
+            meta=None,
+            date=pair.date,
+            flag=FLAG_OKAY,
+            payee='Zen',
+            narration=narration,
+            tags=EMPTY_SET,
+            links=EMPTY_SET,
+            postings=[
+                Posting(
+                    account=source_account,
+                    units=src_amount,
+                    cost=None,
+                    price=None,
+                    flag=None,
+                    meta=src_meta,
+                ),
+                Posting(
+                    account=target_account,
+                    units=tgt_amount,
+                    cost=None,
+                    price=price_per_unit,  # @ per-unit price
+                    flag=None,
+                    meta=tgt_meta,
+                ),
+            ],
+        )
 
     def _make_transaction(
         self, 
