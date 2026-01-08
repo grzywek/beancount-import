@@ -135,3 +135,118 @@ class TestVelobankSource:
             )
             assert source.is_posting_cleared(uncleared_posting) is False
 
+
+class TestCreditCardHtmlParsing:
+    """Test parsing of credit card HTML statements."""
+
+    def test_extract_credit_card_transaction_type_card_payment(self):
+        """Test card payment type extraction."""
+        result = velobank._extract_credit_card_transaction_type(
+            "Operacja kartą 5130 xxxx xxxx 6220 na kwotę 100,00 PLN w MERCHANT, CITY, POL")
+        assert result == "Card payment"
+
+    def test_extract_credit_card_transaction_type_card_refund(self):
+        """Test card refund type extraction."""
+        result = velobank._extract_credit_card_transaction_type(
+            "Zwrot operacji kartą 5130 xxxx xxxx 6220 na kwotę 50,00 PLN w MERCHANT")
+        assert result == "Card refund"
+
+    def test_extract_credit_card_transaction_type_card_fee(self):
+        """Test card fee type extraction."""
+        result = velobank._extract_credit_card_transaction_type(
+            "Opłata za obsługę karty nr 5130 XXX X XXXX 6220 za miesiąc 2024-12 (Obciążenie)")
+        assert result == "Card fee"
+
+    def test_extract_credit_card_transaction_type_repayment(self):
+        """Test credit card repayment type extraction."""
+        result = velobank._extract_credit_card_transaction_type(
+            "spłata karty kredytowej (Uznanie)")
+        assert result == "Credit card repayment"
+
+    def test_html_parser_statement_metadata(self):
+        """Test HTML parser extracts statement metadata correctly."""
+        html_content = '''
+        <html>
+        <h1>Wyciąg z rachunku karty kredytowej numer 5/2025<br/>
+        za okres rozliczeniowy 2025.05.01 - 2025.05.31</h1>
+        <table>
+            <tr class="border_bottom"><td>NA RACHUNEK KARTY KREDYTOWEJ</td>
+                <td class="rightal">62 1560 0013 0000 0200 0537 1656</td></tr>
+        </table>
+        </html>
+        '''
+        parser = velobank.CreditCardHTMLParser()
+        parser.feed(html_content)
+        
+        assert parser.statement_id == '5/2025'
+        assert parser.period_start == datetime.date(2025, 5, 1)
+        assert parser.period_end == datetime.date(2025, 5, 31)
+        assert parser.account_iban == 'PL62156000130000020005371656'
+
+    def test_html_parser_transactions(self):
+        """Test HTML parser extracts transactions correctly."""
+        html_content = '''
+        <html>
+        <table id="operacje" class="rach_log">
+            <tbody>
+                <tr class="border_bottom">
+                    <td class="data">2025.08.11</td>
+                    <td class="data">2025.08.11</td>
+                    <td class="opis">Opłata za obsługę karty (Obciążenie)</td>
+                    <td class="liczba">5,00 PLN</td>
+                </tr>
+                <tr class="border_bottom">
+                    <td class="data">2025.08.13</td>
+                    <td class="data">2025.08.13</td>
+                    <td class="opis">spłata karty kredytowej (Uznanie)</td>
+                    <td class="liczba">-3 120,68 PLN</td>
+                </tr>
+            </tbody>
+        </table>
+        </html>
+        '''
+        parser = velobank.CreditCardHTMLParser()
+        parser.feed(html_content)
+        
+        assert len(parser.transactions) == 2
+        
+        # First transaction - card fee
+        assert parser.transactions[0]['booking_date'] == datetime.date(2025, 8, 11)
+        assert parser.transactions[0]['amount'] == Decimal('5.00')
+        
+        # Second transaction - repayment
+        assert parser.transactions[1]['booking_date'] == datetime.date(2025, 8, 13)
+        assert parser.transactions[1]['amount'] == Decimal('-3120.68')
+
+    def test_html_parser_skips_summary_rows(self):
+        """Test HTML parser skips summary/balance rows."""
+        html_content = '''
+        <html>
+        <table id="operacje" class="rach_log">
+            <tbody>
+                <tr class="border_bottom">
+                    <td></td><td></td>
+                    <td><span class="stift">SALDO POCZĄTKOWE (ZADŁUŻENIE)</span></td>
+                    <td class="numcol">1000,00 PLN</td>
+                </tr>
+                <tr class="border_bottom">
+                    <td class="data">2025.08.11</td>
+                    <td class="data">2025.08.11</td>
+                    <td class="opis">Valid transaction</td>
+                    <td class="liczba">5,00 PLN</td>
+                </tr>
+                <tr class="border_bottom">
+                    <td></td><td></td>
+                    <td><span class="stift">SALDO KOŃCOWE (ZADŁUŻENIE)</span></td>
+                    <td class="numcol">1005,00 PLN</td>
+                </tr>
+            </tbody>
+        </table>
+        </html>
+        '''
+        parser = velobank.CreditCardHTMLParser()
+        parser.feed(html_content)
+        
+        # Only the valid transaction should be parsed
+        assert len(parser.transactions) == 1
+        assert parser.transactions[0]['description'] == 'Valid transaction'

@@ -88,10 +88,12 @@ For account prediction, the `velobank_type`, `velobank_counterparty`, and
 
 import collections
 import datetime
+import glob
 import hashlib
 import os
 import re
 import subprocess
+from html.parser import HTMLParser
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 from beancount.core.data import Balance, Document, Posting, Transaction, EMPTY_SET, Open
@@ -441,6 +443,258 @@ def detect_format(text: str) -> str:
 
     # Default to old format
     return 'old'
+
+
+# ============================================================================
+# HTML Credit Card Statement Parsing
+# ============================================================================
+
+class CreditCardHTMLParser(HTMLParser):
+    """HTML parser for VeloBank credit card statements.
+    
+    Extracts:
+    - Statement metadata (statement_id, period, account_iban)
+    - Transactions from both main table and per-card breakdown tables
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self.statement_id = ''
+        self.period_start = None
+        self.period_end = None
+        self.account_iban = ''
+        self.transactions = []
+        
+        # Parser state
+        self._in_h1 = False
+        self._in_table = False
+        self._table_id = None
+        self._in_tbody = False
+        self._in_tr = False
+        self._in_td = False
+        self._td_class = ''
+        self._td_data = []
+        self._current_row = []
+        self._current_text = ''
+        self._collecting_iban = False
+        
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        
+        if tag == 'h1':
+            self._in_h1 = True
+            self._current_text = ''
+        elif tag == 'table':
+            self._in_table = True
+            self._table_id = attrs_dict.get('id', '')
+        elif tag == 'tbody':
+            self._in_tbody = True
+        elif tag == 'tr':
+            self._in_tr = True
+            self._current_row = []
+        elif tag == 'td':
+            self._in_td = True
+            self._td_class = attrs_dict.get('class', '')
+            self._current_text = ''
+            
+    def handle_endtag(self, tag):
+        if tag == 'h1':
+            self._in_h1 = False
+            self._parse_h1_content(self._current_text)
+        elif tag == 'table':
+            self._in_table = False
+            self._table_id = None
+        elif tag == 'tbody':
+            self._in_tbody = False
+        elif tag == 'tr':
+            self._in_tr = False
+            if self._current_row and self._in_tbody:
+                self._process_row(self._current_row)
+        elif tag == 'td':
+            self._in_td = False
+            if self._in_tr:
+                self._current_row.append({
+                    'class': self._td_class,
+                    'text': self._current_text.strip()
+                })
+                # Check for IBAN in "NA RACHUNEK KARTY KREDYTOWEJ" row
+                if 'rightal' in self._td_class and not self.account_iban:
+                    text = self._current_text.strip()
+                    # Look for IBAN pattern (26 digits with spaces)
+                    iban_match = re.search(r'(\d{2}[\s\d]{24,})', text)
+                    if iban_match:
+                        self.account_iban = 'PL' + re.sub(r'\s', '', iban_match.group(1))
+                        
+    def handle_data(self, data):
+        if self._in_h1 or self._in_td:
+            self._current_text += data
+            
+    def _parse_h1_content(self, text):
+        """Extract statement number and period from h1 content."""
+        # Pattern: "Wyciąg z rachunku karty kredytowej numer X/YYYY"
+        stmt_match = re.search(r'numer\s+(\d+/\d{4})', text)
+        if stmt_match:
+            self.statement_id = stmt_match.group(1)
+            
+        # Pattern: "za okres rozliczeniowy YYYY.MM.DD - YYYY.MM.DD"
+        period_match = re.search(
+            r'okres rozliczeniowy\s+(\d{4}\.\d{2}\.\d{2})\s*-\s*(\d{4}\.\d{2}\.\d{2})',
+            text
+        )
+        if period_match:
+            self.period_start = parse_polish_date(period_match.group(1))
+            self.period_end = parse_polish_date(period_match.group(2))
+            
+    def _process_row(self, row):
+        """Process a table row and extract transaction data if valid."""
+        if len(row) < 3:
+            return
+            
+        # Skip summary/balance rows
+        row_text = ' '.join(cell['text'] for cell in row)
+        skip_patterns = [
+            'SALDO POCZĄTKOWE',
+            'SALDO KOŃCOWE',
+            'SUMA TRANSAKCJI DLA KARTY',
+            'ŁĄCZNA SUMA TRANSAKCJI',
+            'DATA KSIĘGOWANIA',  # header row
+        ]
+        if any(pattern in row_text for pattern in skip_patterns):
+            return
+            
+        # Extract fields based on row structure
+        # Expected: [booking_date, txn_date, description, amount]
+        booking_date_text = ''
+        txn_date_text = ''
+        description = ''
+        amount_text = ''
+        
+        for cell in row:
+            cell_class = cell['class']
+            cell_text = cell['text']
+            
+            if 'data' in cell_class and not booking_date_text:
+                booking_date_text = cell_text
+            elif 'data' in cell_class and booking_date_text and not txn_date_text:
+                txn_date_text = cell_text
+            elif 'opis' in cell_class:
+                description = cell_text
+            elif 'liczba' in cell_class or 'numcol' in cell_class:
+                amount_text = cell_text
+                
+        # Validate: need at least dates and amount
+        if not booking_date_text or not amount_text:
+            return
+            
+        # Parse dates
+        try:
+            booking_date = parse_polish_date(booking_date_text)
+            txn_date = parse_polish_date(txn_date_text) if txn_date_text else booking_date
+        except (ValueError, AttributeError):
+            return
+            
+        # Parse amount
+        try:
+            amount = parse_polish_amount(amount_text)
+        except (ValueError, TypeError):
+            return
+            
+        # Create transaction
+        self.transactions.append({
+            'booking_date': booking_date,
+            'transaction_date': txn_date,
+            'description': description,
+            'amount': amount,
+        })
+
+
+def parse_credit_card_html(html_path: str) -> StatementInfo:
+    """Parse a VeloBank credit card HTML statement.
+    
+    Args:
+        html_path: Path to the HTML file.
+        
+    Returns:
+        StatementInfo containing parsed data.
+    """
+    with open(html_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+        
+    parser = CreditCardHTMLParser()
+    parser.feed(content)
+    
+    filename = os.path.basename(html_path)
+    
+    # Convert parsed transactions to RawTransaction objects
+    transactions = []
+    for i, txn in enumerate(parser.transactions, 1):
+        description = txn['description']
+        amount = txn['amount']
+        
+        # Extract transaction type
+        transaction_type = _extract_credit_card_transaction_type(description)
+        
+        # Extract counterparty and location for card operations
+        counterparty = None
+        counterparty_address = None
+        card_number = None
+        
+        if 'Operacja kartą' in description or 'Zwrot operacji kartą' in description:
+            counterparty, counterparty_address = _extract_card_merchant(description)
+            card_number = _extract_card_number(description)
+        elif 'Opłata za obsługę karty' in description:
+            # Extract card number from fee description
+            card_number = _extract_card_number(description)
+        
+        transactions.append(RawTransaction(
+            transaction_date=txn['transaction_date'],
+            booking_date=txn['booking_date'],
+            description=description,
+            amount=amount,
+            balance_after=D('0'),  # HTML statements don't show running balance
+            statement_id=parser.statement_id or 'html',
+            line_number=i,
+            filename=html_path,
+            transaction_type=transaction_type,
+            counterparty=counterparty,
+            counterparty_iban=None,
+            counterparty_address=counterparty_address,
+            title=None,
+            card_number=card_number,
+        ))
+    
+    return StatementInfo(
+        filename=html_path,
+        statement_id=parser.statement_id or filename.replace('.html', ''),
+        account_iban=parser.account_iban,
+        period_start=parser.period_start or datetime.date.today(),
+        period_end=parser.period_end or datetime.date.today(),
+        opening_balance=None,
+        transactions=transactions,
+    )
+
+
+def _extract_credit_card_transaction_type(description: str) -> Optional[str]:
+    """Extract transaction type from credit card statement description.
+    
+    Args:
+        description: Transaction description text.
+        
+    Returns:
+        Transaction type string.
+    """
+    description_lower = description.lower()
+    
+    if 'zwrot operacji kartą' in description_lower:
+        return 'Card refund'
+    elif 'operacja kartą' in description_lower:
+        return 'Card payment'
+    elif 'opłata za obsługę karty' in description_lower:
+        return 'Card fee'
+    elif 'spłata karty kredytowej' in description_lower:
+        return 'Credit card repayment'
+    
+    return _extract_transaction_type(description)
 
 
 def _extract_fields_from_continuation_text(text: str) -> dict:
@@ -1903,18 +2157,24 @@ class VelobankSource(Source):
         self._load_statements()
 
     def _load_statements(self) -> None:
-        """Load and parse all PDF statements from the directory."""
+        """Load and parse all PDF and HTML statements from the directory."""
         pdf_files = []
+        html_files = []
 
-        # Recursively find all PDF files
+        # Recursively find all PDF and HTML files
         for root, dirs, files in os.walk(self.directory):
             for filename in files:
+                filepath = os.path.join(root, filename)
                 if filename.lower().endswith('.pdf'):
-                    pdf_files.append(os.path.join(root, filename))
+                    pdf_files.append(filepath)
+                elif filename.lower().endswith('.html'):
+                    html_files.append(filepath)
 
         # Sort files for consistent ordering
         pdf_files.sort()
+        html_files.sort()
 
+        # Load PDF statements
         for pdf_path in pdf_files:
             try:
                 # Ensure file has unique suffix, renaming if needed
@@ -1925,6 +2185,24 @@ class VelobankSource(Source):
                 self.statements.append(statement)
             except Exception as e:
                 self.log_status(f'velobank: error loading {pdf_path}: {e}')
+        
+        # Load HTML credit card statements
+        for html_path in html_files:
+            try:
+                # Check if it's a credit card statement
+                with open(html_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                if 'karty kredytowej' not in content.lower():
+                    continue  # Skip non-credit-card HTML files
+                    
+                # Ensure file has unique suffix, renaming if needed
+                html_path = ensure_file_has_suffix(html_path)
+                
+                self.log_status(f'velobank: loading HTML {html_path}')
+                statement = parse_credit_card_html(html_path)
+                self.statements.append(statement)
+            except Exception as e:
+                self.log_status(f'velobank: error loading {html_path}: {e}')
 
     def get_example_key_value_pairs(
         self,
