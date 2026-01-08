@@ -424,8 +424,13 @@ class EnableBankingSource(Source):
             for filename in os.listdir(bank_path):
                 if filename.startswith('transactions_') and filename.endswith('.json'):
                     txn_path = os.path.join(bank_path, filename)
-                    # Extract account_id from filename: transactions_IBAN_CURRENCY.json
+                    # Extract account_id from filename: transactions_IBAN_CURRENCY[-suffix].json
+                    # Remove the 'transactions_' prefix and '.json' suffix
                     account_id = filename[len('transactions_'):-len('.json')]
+                    # Strip the random suffix if present (e.g., '-7277')
+                    if SUFFIX_PATTERN.search(account_id):
+                        # Remove the -NNNN suffix
+                        account_id = re.sub(r'-\d{4}$', '', account_id)
                     self._load_transactions(txn_path, account_id, bank_name)
         
         self.log_status(
