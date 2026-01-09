@@ -464,6 +464,7 @@ class CreditCardHTMLParser(HTMLParser):
         self.period_end = None
         self.account_iban = ''
         self.transactions = []
+        self.closing_balance = None  # Closing balance from statement
         
         # Parser state
         self._in_h1 = False
@@ -550,11 +551,28 @@ class CreditCardHTMLParser(HTMLParser):
         if len(row) < 3:
             return
             
-        # Skip summary/balance rows
         row_text = ' '.join(cell['text'] for cell in row)
+        
+        # Extract closing balance from "SALDO KOŃCOWE" row
+        if 'SALDO KOŃCOWE' in row_text:
+            for cell in row:
+                cell_class = cell['class']
+                cell_text = cell['text']
+                if 'numcol' in cell_class or 'liczba' in cell_class:
+                    try:
+                        # For credit cards, the balance shown is positive but represents debt
+                        # In Beancount, Liabilities accounts have negative balance for debt
+                        # So a debt of 100 PLN = -100 PLN in Beancount
+                        balance_value = parse_polish_amount(cell_text)
+                        # Negate: positive debt in statement = negative liability balance
+                        self.closing_balance = -balance_value
+                    except (ValueError, TypeError):
+                        pass
+            return
+        
+        # Skip other summary/balance rows
         skip_patterns = [
             'SALDO POCZĄTKOWE',
-            'SALDO KOŃCOWE',
             'SUMA TRANSAKCJI DLA KARTY',
             'ŁĄCZNA SUMA TRANSAKCJI',
             'DATA KSIĘGOWANIA',  # header row
@@ -625,9 +643,46 @@ def parse_credit_card_html(html_path: str) -> StatementInfo:
     
     filename = os.path.basename(html_path)
     
+    # Get closing balance (default to 0 if not found)
+    closing_balance = parser.closing_balance if parser.closing_balance is not None else D('0')
+    
+    # Calculate running balances by working backwards from closing balance
+    # For credit cards: amounts are positive for charges, negative for payments/credits
+    # The balance_after represents the liability balance (negative = debt)
+    # We need to work backwards: for each transaction, the balance before = balance after - amount
+    # Since amounts in HTML are: positive = charge (increases debt), negative = payment (reduces debt)
+    # But for Liabilities: charges should be NEGATIVE (credit to liability = increase debt)
+    # and payments should be POSITIVE (debit to liability = reduce debt)
+    # The HTML shows charges as positive, so we need to NEGATE amounts for Beancount
+    
+    # First pass: convert amounts for Beancount (negate them for liability accounting)
+    parsed_txns = []
+    for txn in parser.transactions:
+        # Negate amount: HTML positive (charge) -> Beancount negative (credit to liability)
+        beancount_amount = -txn['amount']
+        parsed_txns.append({
+            'booking_date': txn['booking_date'],
+            'transaction_date': txn['transaction_date'],
+            'description': txn['description'],
+            'amount': beancount_amount,
+        })
+    
+    # Sort transactions by booking_date for proper running balance calculation
+    # HTML may have transactions grouped by card, not chronologically
+    parsed_txns.sort(key=lambda x: (x['booking_date'], x['transaction_date']))
+    
+    # Calculate balance_after for each transaction (working backwards)
+    # Start from closing balance and work backwards
+    running_balance = closing_balance
+    balances = []
+    for txn in reversed(parsed_txns):
+        balances.insert(0, running_balance)
+        # balance_before = balance_after - amount
+        running_balance = running_balance - txn['amount']
+    
     # Convert parsed transactions to RawTransaction objects
     transactions = []
-    for i, txn in enumerate(parser.transactions, 1):
+    for i, (txn, balance) in enumerate(zip(parsed_txns, balances), 1):
         description = txn['description']
         amount = txn['amount']
         
@@ -651,7 +706,7 @@ def parse_credit_card_html(html_path: str) -> StatementInfo:
             booking_date=txn['booking_date'],
             description=description,
             amount=amount,
-            balance_after=D('0'),  # HTML statements don't show running balance
+            balance_after=balance,
             statement_id=parser.statement_id or 'html',
             line_number=i,
             filename=html_path,
@@ -669,7 +724,7 @@ def parse_credit_card_html(html_path: str) -> StatementInfo:
         account_iban=parser.account_iban,
         period_start=parser.period_start or datetime.date.today(),
         period_end=parser.period_end or datetime.date.today(),
-        opening_balance=None,
+        opening_balance=running_balance,  # The calculated opening balance
         transactions=transactions,
     )
 
@@ -2087,8 +2142,12 @@ def get_velobank_account_map(accounts: Dict[str, Open]) -> Dict[str, str]:
 def _generate_transaction_id(txn: RawTransaction) -> str:
     """Generate a unique ID for a transaction.
 
-    Uses booking_date, amount and balance_after - these are always stable and unique.
-    Note: statement_id and description are NOT used as they may vary.
+    For PDF statements: uses booking_date, amount, and balance_after.
+    These are unique because balance_after is a running balance.
+    
+    For HTML credit card statements: also includes line_number because
+    multiple transactions can have same date/amount/balance when the
+    running balance is calculated (not from source).
 
     Args:
         txn: The raw transaction.
@@ -2096,8 +2155,19 @@ def _generate_transaction_id(txn: RawTransaction) -> str:
     Returns:
         A unique identifier string.
     """
-    # Use only stable, unique values: booking_date + amount + balance_after
-    data = f"{txn.booking_date}:{txn.amount}:{txn.balance_after}"
+    # Build hash from stable values
+    parts = [
+        str(txn.booking_date),
+        str(txn.amount),
+        str(txn.balance_after),
+    ]
+    
+    # For HTML credit card statements, add line_number for uniqueness
+    # (multiple transactions can have same date/amount/calculated balance)
+    if txn.filename.endswith('.html'):
+        parts.append(str(txn.line_number))
+    
+    data = ':'.join(parts)
     hash_value = hashlib.md5(data.encode()).hexdigest()[:12]
     # Format: velobank:{hash}
     return f"velobank:{hash_value}"
