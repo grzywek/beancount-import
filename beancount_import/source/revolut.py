@@ -77,7 +77,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Tuple, Set
 
-from beancount.core.data import Balance, Posting, Transaction, EMPTY_SET
+from beancount.core.data import Balance, Document, Posting, Transaction, EMPTY_SET
 from beancount.core.flags import FLAG_OKAY
 from beancount.core.number import D, ZERO
 from beancount.core.amount import Amount
@@ -92,14 +92,46 @@ SOURCE_REF_KEY = 'source_ref'
 SOURCE_BANK_KEY = 'source_bank'
 TRANSACTION_TYPE_KEY = 'transaction_type'
 COUNTERPARTY_KEY = 'counterparty'
+COUNTERPARTY_IBAN_KEY = 'counterparty_iban'
+COUNTERPARTY_BBAN_KEY = 'counterparty_bban'
 COUNTERPARTY_ADDRESS_KEY = 'counterparty_address'
+REFERENCE_KEY = 'title'  # Transfer reference/title
 ACCOUNT_IBAN_KEY = 'account_iban'
 ACCOUNT_IBAN_PL_KEY = 'account_iban_pl'
 CARD_NUMBER_KEY = 'card_number'
+SOURCE_CARD_KEY = 'source_card'  # Card used for top-up (From:)
 ORIGINAL_AMOUNT_KEY = 'original_amount'
 ORIGINAL_CURRENCY_KEY = 'original_currency'
 EXCHANGE_RATE_KEY = 'exchange_rate'
 SOURCE_DOC_KEY = 'document'
+BALANCE_KEY = 'balance'
+
+# Transaction type normalization (raw CSV type -> nice display name)
+TRANSACTION_TYPE_MAP = {
+    # Credit card CSV types (uppercase)
+    'CARD_PAYMENT': 'Card payment',
+    'CARD_REFUND': 'Card refund',
+    'TRANSFER': 'Transfer',
+    'CASHBACK': 'Cashback',
+    'FEE': 'Fee',
+    'REFUND': 'Refund',
+    'TOPUP': 'Top-up',
+    'ATM': 'ATM withdrawal',
+    # Regular account CSV types (Title Case)
+    'Card Payment': 'Card payment',
+    'Card Refund': 'Card refund',
+    'Transfer': 'Transfer',
+    'Exchange': 'Exchange',
+    'Top-Up': 'Top-up',
+    'Reward': 'Reward',
+    'Fee': 'Fee',
+}
+
+
+def normalize_transaction_type(raw_type: str) -> str:
+    """Normalize transaction type to nice display name."""
+    return TRANSACTION_TYPE_MAP.get(raw_type, raw_type)
+
 
 # Pattern to match files that already have a 4-digit suffix before extension
 SUFFIX_PATTERN = re.compile(r'-\d{4}(\.[^.]+)?$')
@@ -173,11 +205,21 @@ class RevolutTransaction:
     product: Optional[str]  # For regular accounts
     state: Optional[str]  # For regular accounts
     line_number: int
+    # Raw datetime strings (with time)
+    started_date_raw: Optional[str] = None  # Full datetime string with time
+    completed_date_raw: Optional[str] = None  # Full datetime string with time
     # PDF enrichment fields
-    iban: Optional[str] = None
-    iban_pl: Optional[str] = None
-    card_number: Optional[str] = None
-    counterparty_address: Optional[str] = None
+    iban: Optional[str] = None  # Account IBAN (LT)
+    iban_pl: Optional[str] = None  # Account IBAN (PL)
+    pdf_filename: Optional[str] = None  # Source PDF filename for document_2
+    pdf_description: Optional[str] = None  # Description from PDF (e.g., "Open banking top-up")
+    reference: Optional[str] = None  # Transfer reference/title
+    counterparty_name: Optional[str] = None  # Counterparty name
+    counterparty_iban: Optional[str] = None  # Counterparty IBAN
+    counterparty_bban: Optional[str] = None  # Counterparty BBAN (Polish 26-digit)
+    counterparty_address: Optional[str] = None  # Counterparty address
+    card_number: Optional[str] = None  # Card used for payment
+    source_card: Optional[str] = None  # Card for top-up
     original_amount: Optional[str] = None
     original_currency: Optional[str] = None
     exchange_rate: Optional[str] = None
@@ -198,10 +240,15 @@ class PdfTransactionInfo:
     date: datetime.date
     description: str
     amount: Optional[Decimal]
-    iban: Optional[str] = None
-    iban_pl: Optional[str] = None
-    card_number: Optional[str] = None
-    counterparty_address: Optional[str] = None
+    iban: Optional[str] = None  # Account IBAN (LT)
+    iban_pl: Optional[str] = None  # Account IBAN (PL)
+    reference: Optional[str] = None  # Transfer reference/title
+    counterparty_name: Optional[str] = None  # Counterparty name
+    counterparty_iban: Optional[str] = None  # Counterparty IBAN
+    counterparty_bban: Optional[str] = None  # Counterparty BBAN (Polish 26-digit)
+    counterparty_address: Optional[str] = None  # Counterparty address (To:)
+    card_number: Optional[str] = None  # Card used for payment (Card:)
+    source_card: Optional[str] = None  # Card used for top-up (From: *xxxx)
     original_amount: Optional[str] = None
     original_currency: Optional[str] = None
     exchange_rate: Optional[str] = None
@@ -211,6 +258,7 @@ class PdfTransactionInfo:
 class PdfCurrencySection:
     """A currency section within a PDF (e.g., PLN Statement, EUR Statement)."""
     currency: str
+    filename: Optional[str] = None  # Source PDF filename
     ibans: List[str] = field(default_factory=list)
     transactions: List[PdfTransactionInfo] = field(default_factory=list)
 
@@ -243,66 +291,124 @@ def parse_pdf(pdf_path: str) -> Dict[str, PdfCurrencySection]:
     sections: Dict[str, PdfCurrencySection] = {}
     current_section: Optional[PdfCurrencySection] = None
     
-    # Patterns
-    currency_header_pattern = re.compile(r'^\s*([A-Z]{3})\s+Statement\s*$')
+    # Collect all IBANs globally first
+    global_ibans: List[str] = []
     iban_pattern = re.compile(r'IBAN\s+([A-Z]{2}[A-Z0-9]{10,32})')
-    date_pattern = re.compile(r'^([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})')
+    for line in lines:
+        iban_match = iban_pattern.search(line)
+        if iban_match:
+            iban = iban_match.group(1)
+            if iban not in global_ibans:
+                global_ibans.append(iban)
+    
+    # Patterns - English format
+    currency_header_pattern = re.compile(r'^\s*([A-Z]{3})\s+Statement\s*$')
+    date_pattern = re.compile(r'^([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})')  # "Jan 3, 2025"
     card_pattern = re.compile(r'Card:\s*(\d{6}\*+\d{4})')
-    rate_pattern = re.compile(r'Revolut Rate\s+(.+?)\s*\(ECB')
     to_pattern = re.compile(r'To:\s*(.+)')
     from_pattern = re.compile(r'From:\s*(.+)')
+    reference_pattern = re.compile(r'Reference:\s*(.+)')
+    
+    # Patterns - Polish format (credit card statements)
+    # Polish months: sty, lut, mar, kwi, maj, cze, lip, sie, wrz, paź, lis, gru
+    polish_date_pattern = re.compile(r'^(\d{1,2})\s+(sty|lut|mar|kwi|maj|cze|lip|sie|wrz|paź|lis|gru)\s+(\d{4})')
+    polish_card_pattern = re.compile(r'Karta:\s*(\d{6}\*+\d{4})')
+    polish_to_pattern = re.compile(r'Do:\s*(.+)')
+    polish_from_pattern = re.compile(r'Od:\s*(.+)')
+    
+    # Pattern for original currency amount on its own line: €4.43, $151.05
+    orig_currency_pattern = re.compile(r'^\s*([€$£])([0-9,.]+)\s*$')
+    # Pattern to extract IBAN from "NAME, IBAN" format
+    iban_in_address_pattern = re.compile(r'^(.+?),\s*([A-Z]{2}[A-Z0-9]{10,32})$')
+    # Pattern to extract BBAN from "NAME, 26-digit-number" format (Polish account number)
+    bban_in_address_pattern = re.compile(r'^(.+?),\s*(\d{26})$')
+    
+    # Polish month name to number mapping
+    polish_months = {
+        'sty': 1, 'lut': 2, 'mar': 3, 'kwi': 4, 'maj': 5, 'cze': 6,
+        'lip': 7, 'sie': 8, 'wrz': 9, 'paź': 10, 'lis': 11, 'gru': 12
+    }
     
     i = 0
     while i < len(lines):
         line = lines[i]
         
-        # Check for currency section header
+        # Check for currency section header (e.g., "PLN Statement")
         header_match = currency_header_pattern.search(line)
         if header_match:
             currency = header_match.group(1)
-            current_section = PdfCurrencySection(currency=currency)
-            sections[currency] = current_section
+            if currency not in sections:
+                current_section = PdfCurrencySection(
+                    currency=currency,
+                    filename=os.path.basename(pdf_path),
+                )
+                current_section.ibans = global_ibans.copy()
+                sections[currency] = current_section
+            else:
+                current_section = sections[currency]
             i += 1
             continue
         
-        # Extract IBAN
-        iban_match = iban_pattern.search(line)
-        if iban_match and current_section:
-            iban = iban_match.group(1)
-            if iban not in current_section.ibans:
-                current_section.ibans.append(iban)
-        
-        # Look for transaction lines (start with date)
+        # Look for transaction lines (start with date - English or Polish format)
         date_match = date_pattern.match(line.strip())
-        if date_match and current_section:
-            # Parse transaction header line
+        polish_date_match = polish_date_pattern.match(line.strip())
+        
+        txn_date = None
+        date_str = None
+        
+        if date_match:
+            # English format: "Jan 3, 2025"
             try:
                 date_str = date_match.group(1)
                 txn_date = datetime.datetime.strptime(date_str, "%b %d, %Y").date()
             except ValueError:
-                i += 1
-                continue
+                pass
+        elif polish_date_match:
+            # Polish format: "3 sty 2025"
+            try:
+                day = int(polish_date_match.group(1))
+                month_name = polish_date_match.group(2)
+                year = int(polish_date_match.group(3))
+                month = polish_months.get(month_name, 1)
+                txn_date = datetime.date(year, month, day)
+                date_str = polish_date_match.group(0)
+            except (ValueError, KeyError):
+                pass
+        
+        if txn_date:
             
             # Extract description (between date and first amount)
-            # Format: "Jan 6, 2025             Trading 212                  627.36 PLN"
             rest_of_line = line.strip()[len(date_str):].strip()
             
-            # Find description by looking for amount pattern at the end
-            # Amounts look like: "627.36 PLN", "2,043.44 PLN", "$151.05"
-            amount_pattern = re.compile(r'\s+[\d,]+\.\d{2}\s+[A-Z]{3}\s*$|\s+[\$€£][\d,]+\.?\d*\s*$')
-            amount_match = amount_pattern.search(rest_of_line)
+            # Find amount with currency to detect which section this belongs to
+            # Pattern: "1,000.00 PLN" or "€23.36" or "$151.05"
+            amount_pattern_re = re.compile(r'([\d,]+\.\d{2})\s+([A-Z]{3})')
+            symbol_amount_pattern = re.compile(r'[€$£][\d,]+\.\d{2}')
+            amount_match = amount_pattern_re.search(rest_of_line)
+            symbol_match = symbol_amount_pattern.search(rest_of_line)
             
+            # Detect currency from the line
+            detected_currency = None
             if amount_match:
-                # Description is everything before the amount
+                detected_currency = amount_match.group(2)
                 description = rest_of_line[:amount_match.start()].strip()
+            elif symbol_match:
+                # Handle €/$/£ format - strip from first currency symbol onward
+                description = rest_of_line[:symbol_match.start()].strip()
+                # Detect currency from symbol
+                symbol = rest_of_line[symbol_match.start()]
+                if symbol == '€':
+                    detected_currency = 'EUR'
+                elif symbol == '$':
+                    detected_currency = 'USD'
+                elif symbol == '£':
+                    detected_currency = 'GBP'
             else:
-                # No amount found, try to extract first meaningful words
-                # Skip lines that are just amounts or empty
+                # Take words until we hit an amount
                 words = rest_of_line.split()
-                # Take words until we hit what looks like an amount
                 desc_words = []
                 for word in words:
-                    if re.match(r'^[\d,]+\.\d{2}$', word) or re.match(r'^[\$€£]', word):
+                    if re.match(r'^[\d,]+\.\d{2}$', word) or re.match(r'^[€$£][\d,]+', word):
                         break
                     desc_words.append(word)
                 description = ' '.join(desc_words)
@@ -314,60 +420,147 @@ def parse_pdf(pdf_path: str) -> Dict[str, PdfCurrencySection]:
                 amount=None,
             )
             
-            # Set IBANs from section
-            if current_section.ibans:
-                # Prefer LT IBAN as main, PL as secondary
-                for iban in current_section.ibans:
-                    if iban.startswith('LT'):
-                        txn_info.iban = iban
-                    elif iban.startswith('PL'):
-                        txn_info.iban_pl = iban
-                if not txn_info.iban and current_section.ibans:
-                    txn_info.iban = current_section.ibans[0]
+            # Set IBANs - prefer LT as main, PL as secondary
+            for iban in global_ibans:
+                if iban.startswith('LT'):
+                    txn_info.iban = iban
+                elif iban.startswith('PL'):
+                    txn_info.iban_pl = iban
+            if not txn_info.iban and global_ibans:
+                txn_info.iban = global_ibans[0]
             
-            # Look at following lines for more details
+            # Look at following lines for details (up to 6 lines or next date)
             j = i + 1
-            while j < min(i + 5, len(lines)):
+            while j < min(i + 8, len(lines)):
                 detail_line = lines[j]
                 
-                card_match = card_pattern.search(detail_line)
+                # Stop if we hit another date line (English or Polish format)
+                if date_pattern.match(detail_line.strip()) or polish_date_pattern.match(detail_line.strip()):
+                    break
+                
+                # Check for Reference: (transfer title)
+                ref_match = reference_pattern.search(detail_line)
+                if ref_match:
+                    txn_info.reference = ref_match.group(1).strip()
+                
+                # Check for card number (Card: or Karta:)
+                card_match = card_pattern.search(detail_line) or polish_card_pattern.search(detail_line)
                 if card_match:
                     txn_info.card_number = card_match.group(1)
                 
-                rate_match = rate_pattern.search(detail_line)
+                # Check for To:/Do: address (recipient for payments)
+                # Format: "To: Name, Address" or "Do: Name, City"
+                to_match = to_pattern.search(detail_line) or polish_to_pattern.search(detail_line)
+                if to_match:
+                    to_value = to_match.group(1).strip()
+                    # Try to extract IBAN from "NAME, IBAN" format
+                    iban_match = iban_in_address_pattern.match(to_value)
+                    if iban_match:
+                        txn_info.counterparty_name = iban_match.group(1).strip()
+                        txn_info.counterparty_iban = iban_match.group(2)
+                    else:
+                        # Try to extract BBAN from "NAME, 26-digit" format (Polish)
+                        bban_match = bban_in_address_pattern.match(to_value)
+                        if bban_match:
+                            txn_info.counterparty_name = bban_match.group(1).strip()
+                            txn_info.counterparty_bban = bban_match.group(2)
+                        else:
+                            # Just set as address (e.g., "Allegro, Poznan")
+                            txn_info.counterparty_address = to_value
+                
+                # Check for From:/Od: (source card or sender info)
+                # Format: "From: *6671" or "Od: NAME, IBAN"
+                from_match = from_pattern.search(detail_line) or polish_from_pattern.search(detail_line)
+                if from_match:
+                    from_value = from_match.group(1).strip()
+                    # If it's a card reference (like *6671), store as source_card
+                    if from_value.startswith('*'):
+                        txn_info.source_card = from_value
+                    else:
+                        # Try to extract IBAN from "NAME, IBAN" format
+                        iban_match = iban_in_address_pattern.match(from_value)
+                        if iban_match:
+                            txn_info.counterparty_name = iban_match.group(1).strip()
+                            txn_info.counterparty_iban = iban_match.group(2)
+                        else:
+                            # Try to extract BBAN from "NAME, 26-digit" format
+                            bban_match = bban_in_address_pattern.match(from_value)
+                            if bban_match:
+                                txn_info.counterparty_name = bban_match.group(1).strip()
+                                txn_info.counterparty_bban = bban_match.group(2)
+                            else:
+                                # Just address without IBAN
+                                if not txn_info.counterparty_address:
+                                    txn_info.counterparty_address = from_value
+                
+                # Check for Revolut Rate (English) or Kurs Revolut (Polish)
+                rate_match = re.search(r'Revolut Rate\s+(.+?)\s*\(ECB', detail_line)
                 if rate_match:
                     txn_info.exchange_rate = rate_match.group(1).strip()
-                    # Extract original amount (usually after the rate line)
-                    # Format like: $151.05
-                    orig_amount_match = re.search(r'\$([0-9,.]+)|€([0-9,.]+)|£([0-9,.]+)', detail_line)
-                    if orig_amount_match:
-                        for g in orig_amount_match.groups():
-                            if g:
-                                txn_info.original_amount = g
-                                break
-                        # Determine original currency from symbol
-                        if '$' in detail_line:
-                            txn_info.original_currency = 'USD'
-                        elif '€' in detail_line:
+                
+                # Polish exchange rate: "Kurs Revolut: 1.00 PLN = 5.84 CZK (kurs ECB*: ...)"
+                polish_rate_match = re.search(r'Kurs Revolut:\s*(.+?)\s*\(kurs ECB', detail_line, re.IGNORECASE)
+                if polish_rate_match:
+                    txn_info.exchange_rate = polish_rate_match.group(1).strip()
+                    # Polish format has original amount at end of line: "566.26 CZK"
+                    orig_at_end = re.search(r'([\d,.]+)\s+([A-Z]{3})\s*$', detail_line)
+                    if orig_at_end:
+                        amount = orig_at_end.group(1).replace(',', '')
+                        currency = orig_at_end.group(2)
+                        if currency != 'PLN':  # Only if it's not the local currency
+                            txn_info.original_amount = amount
+                            txn_info.original_currency = currency
+                
+                # Check for original currency amount (€4.43, $100.00) on its own line
+                orig_match = orig_currency_pattern.match(detail_line)
+                if orig_match:
+                    symbol = orig_match.group(1)
+                    amount = orig_match.group(2)
+                    txn_info.original_amount = amount
+                    if symbol == '€':
+                        txn_info.original_currency = 'EUR'
+                    elif symbol == '$':
+                        txn_info.original_currency = 'USD'
+                    elif symbol == '£':
+                        txn_info.original_currency = 'GBP'
+                
+                # Also check for original amount on Revolut Rate line
+                # Format 1: "Revolut Rate $1.00 = €0.97 (ECB rate...)   €17.00"
+                # Format 2: "Revolut Rate $1.00 = 4.13 PLN (ECB rate...)   34.99 PLN"
+                if not txn_info.original_amount and 'Revolut Rate' in detail_line:
+                    # Try symbol format first (€17.00)
+                    inline_orig = re.search(r'([€$£])([0-9,.]+)\s*$', detail_line)
+                    if inline_orig:
+                        symbol = inline_orig.group(1)
+                        txn_info.original_amount = inline_orig.group(2)
+                        if symbol == '€':
                             txn_info.original_currency = 'EUR'
-                        elif '£' in detail_line:
+                        elif symbol == '$':
+                            txn_info.original_currency = 'USD'
+                        elif symbol == '£':
                             txn_info.original_currency = 'GBP'
-                
-                to_match = to_pattern.search(detail_line)
-                if to_match:
-                    txn_info.counterparty_address = to_match.group(1).strip()
-                
-                from_match = from_pattern.search(detail_line)
-                if from_match and not txn_info.counterparty_address:
-                    txn_info.counterparty_address = from_match.group(1).strip()
-                
-                # Stop if we hit another date line
-                if date_pattern.match(detail_line.strip()):
-                    break
+                    else:
+                        # Try code format (34.99 PLN)
+                        code_orig = re.search(r'([0-9,.]+)\s+([A-Z]{3})\s*$', detail_line)
+                        if code_orig:
+                            txn_info.original_amount = code_orig.group(1).replace(',', '')
+                            txn_info.original_currency = code_orig.group(2)
                 
                 j += 1
             
-            current_section.transactions.append(txn_info)
+            # Use detected_currency to select/create section
+            if detected_currency:
+                if detected_currency not in sections:
+                    sections[detected_currency] = PdfCurrencySection(
+                        currency=detected_currency,
+                        filename=os.path.basename(pdf_path),
+                        ibans=global_ibans.copy()
+                    )
+                target_section = sections[detected_currency]
+                target_section.transactions.append(txn_info)
+            elif current_section:
+                # Fallback to current section if no currency detected
+                current_section.transactions.append(txn_info)
         
         i += 1
     
@@ -405,15 +598,18 @@ def parse_credit_card_csv(path: str, account_type: str = 'creditcard') -> CsvSta
             if not row.get('Started Date'):
                 continue
             
+            started_date_raw = row['Started Date'].strip()
             try:
-                started_date = parse_revolut_date(row['Started Date'])
+                started_date = parse_revolut_date(started_date_raw)
             except ValueError:
                 continue
             
             completed_date = None
+            completed_date_raw = None
             if row.get('Completed Date'):
+                completed_date_raw = row['Completed Date'].strip()
                 try:
-                    completed_date = parse_revolut_date(row['Completed Date'])
+                    completed_date = parse_revolut_date(completed_date_raw)
                 except ValueError:
                     pass
             
@@ -421,6 +617,8 @@ def parse_credit_card_csv(path: str, account_type: str = 'creditcard') -> CsvSta
                 transaction_type=row.get('Type', '').strip(),
                 started_date=started_date,
                 completed_date=completed_date,
+                started_date_raw=started_date_raw,
+                completed_date_raw=completed_date_raw,
                 description=row.get('Description', '').strip(),
                 amount=parse_revolut_amount(row.get('Amount', '')),
                 fee=parse_revolut_amount(row.get('Fee', '')),
@@ -457,15 +655,18 @@ def parse_account_csv(path: str, account_type: str = 'personal') -> List[CsvStat
             if not row.get('Started Date'):
                 continue
             
+            started_date_raw = row['Started Date'].strip()
             try:
-                started_date = parse_revolut_date(row['Started Date'])
+                started_date = parse_revolut_date(started_date_raw)
             except ValueError:
                 continue
             
             completed_date = None
+            completed_date_raw = None
             if row.get('Completed Date'):
+                completed_date_raw = row['Completed Date'].strip()
                 try:
-                    completed_date = parse_revolut_date(row['Completed Date'])
+                    completed_date = parse_revolut_date(completed_date_raw)
                 except ValueError:
                     pass
             
@@ -475,6 +676,8 @@ def parse_account_csv(path: str, account_type: str = 'personal') -> List[CsvStat
                 transaction_type=row.get('Type', '').strip(),
                 started_date=started_date,
                 completed_date=completed_date,
+                started_date_raw=started_date_raw,
+                completed_date_raw=completed_date_raw,
                 description=row.get('Description', '').strip(),
                 amount=parse_revolut_amount(row.get('Amount', '')),
                 fee=parse_revolut_amount(row.get('Fee', '')),
@@ -513,42 +716,99 @@ def match_csv_with_pdf(
         if not pdf_section:
             continue
         
+        # Get IBANs from PDF section (apply to all transactions in this currency)
+        section_iban_lt = None
+        section_iban_pl = None
+        for iban in pdf_section.ibans:
+            if iban.startswith('LT'):
+                section_iban_lt = iban
+            elif iban.startswith('PL'):
+                section_iban_pl = iban
+        
         # Build lookup of PDF transactions
         pdf_by_date: Dict[datetime.date, List[PdfTransactionInfo]] = {}
         for pdf_txn in pdf_section.transactions:
             pdf_by_date.setdefault(pdf_txn.date, []).append(pdf_txn)
         
         for csv_txn in csv_stmt.transactions:
+            # Always assign IBANs from section
+            if section_iban_lt:
+                csv_txn.iban = section_iban_lt
+            if section_iban_pl:
+                csv_txn.iban_pl = section_iban_pl
+            
             # Use completed_date for matching (that's what PDF shows)
             match_date = csv_txn.completed_date or csv_txn.started_date
             
             pdf_candidates = pdf_by_date.get(match_date, [])
             
-            # Find best match by description
+            # Find best match by description and amount
             best_match = None
             best_score = 0
+            best_match_idx = -1
             
-            for pdf_txn in pdf_candidates:
-                # Simple matching: check if description starts with same word
+            for idx, pdf_txn in enumerate(pdf_candidates):
+                # Skip already matched transactions
+                if getattr(pdf_txn, '_matched', False):
+                    continue
+                
+                score = 0
+                
+                # Check if description starts with same words
                 csv_desc_first = csv_txn.description.split()[0].lower() if csv_txn.description else ''
                 pdf_desc_words = pdf_txn.description.split() if pdf_txn.description else []
                 pdf_desc_first = pdf_desc_words[0].lower() if pdf_desc_words else ''
                 
                 if csv_desc_first and pdf_desc_first and csv_desc_first == pdf_desc_first:
-                    score = 1
-                    if score > best_score:
-                        best_score = score
-                        best_match = pdf_txn
+                    score += 1
+                    
+                    # Check for second word match (e.g., "Payment from" both match)
+                    if len(csv_txn.description.split()) > 1 and len(pdf_desc_words) > 1:
+                        csv_second = csv_txn.description.split()[1].lower()
+                        pdf_second = pdf_desc_words[1].lower()
+                        if csv_second == pdf_second:
+                            score += 1
+                
+                # Try to match by counterparty name in description
+                # E.g., CSV "Payment from JOANNA MAZUR" should match PDF with counterparty_name "JOANNA MAZUR"
+                if pdf_txn.counterparty_name and csv_txn.description:
+                    if pdf_txn.counterparty_name.upper() in csv_txn.description.upper():
+                        score += 5  # Strong match
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = pdf_txn
+                    best_match_idx = idx
             
-            if best_match:
-                # Enrich CSV transaction with PDF data
-                csv_txn.iban = best_match.iban
-                csv_txn.iban_pl = best_match.iban_pl
-                csv_txn.card_number = best_match.card_number
-                csv_txn.counterparty_address = best_match.counterparty_address
-                csv_txn.original_amount = best_match.original_amount
-                csv_txn.original_currency = best_match.original_currency
-                csv_txn.exchange_rate = best_match.exchange_rate
+            if best_match and best_score > 0:
+                # Mark as matched to prevent duplicate matching
+                best_match._matched = True
+                
+                # Enrich CSV transaction with additional PDF data
+                # Copy PDF description (e.g., "Open banking top-up")
+                csv_txn.pdf_description = best_match.description
+                # Track source PDF for document_2
+                csv_txn.pdf_filename = pdf_section.filename
+                if best_match.reference:
+                    csv_txn.reference = best_match.reference
+                if best_match.counterparty_name:
+                    csv_txn.counterparty_name = best_match.counterparty_name
+                if best_match.counterparty_iban:
+                    csv_txn.counterparty_iban = best_match.counterparty_iban
+                if best_match.counterparty_bban:
+                    csv_txn.counterparty_bban = best_match.counterparty_bban
+                if best_match.counterparty_address:
+                    csv_txn.counterparty_address = best_match.counterparty_address
+                if best_match.card_number:
+                    csv_txn.card_number = best_match.card_number
+                if best_match.source_card:
+                    csv_txn.source_card = best_match.source_card
+                if best_match.original_amount:
+                    csv_txn.original_amount = best_match.original_amount
+                if best_match.original_currency:
+                    csv_txn.original_currency = best_match.original_currency
+                if best_match.exchange_rate:
+                    csv_txn.exchange_rate = best_match.exchange_rate
 
 
 def _generate_transaction_id(account_type: str, currency: str, txn: RevolutTransaction) -> str:
@@ -619,22 +879,26 @@ class RevolutSource(Source):
                     filepath = ensure_file_has_suffix(filepath)
                     csv_files.append((filepath, account_type))
                 elif filename.endswith('.pdf'):
-                    pdf_files.append(filepath)
+                    filepath = ensure_file_has_suffix(filepath)
+                    pdf_files.append((filepath, account_type))
         
-        # Parse all PDFs first to build supplementary data
-        all_pdf_sections: Dict[str, PdfCurrencySection] = {}
-        for pdf_path in pdf_files:
+        # Parse all PDFs first to build supplementary data - grouped by account_type
+        pdf_sections_by_account: Dict[str, Dict[str, PdfCurrencySection]] = {}
+        for pdf_path, account_type in pdf_files:
             try:
                 sections = parse_pdf(pdf_path)
+                if account_type not in pdf_sections_by_account:
+                    pdf_sections_by_account[account_type] = {}
+                
                 for currency, section in sections.items():
-                    if currency not in all_pdf_sections:
-                        all_pdf_sections[currency] = section
+                    if currency not in pdf_sections_by_account[account_type]:
+                        pdf_sections_by_account[account_type][currency] = section
                     else:
-                        # Merge transactions
-                        all_pdf_sections[currency].transactions.extend(section.transactions)
+                        # Merge transactions from same account_type
+                        pdf_sections_by_account[account_type][currency].transactions.extend(section.transactions)
                         for iban in section.ibans:
-                            if iban not in all_pdf_sections[currency].ibans:
-                                all_pdf_sections[currency].ibans.append(iban)
+                            if iban not in pdf_sections_by_account[account_type][currency].ibans:
+                                pdf_sections_by_account[account_type][currency].ibans.append(iban)
             except Exception as e:
                 self.log_status(f'revolut: error parsing PDF {pdf_path}: {e}')
         
@@ -651,8 +915,11 @@ class RevolutSource(Source):
             except Exception as e:
                 self.log_status(f'revolut: error parsing CSV {csv_path}: {e}')
         
-        # Enrich CSV transactions with PDF data
-        match_csv_with_pdf(self.statements, all_pdf_sections)
+        # Enrich CSV transactions with PDF data - matching by account_type
+        for stmt in self.statements:
+            pdf_sections = pdf_sections_by_account.get(stmt.account_type, {})
+            if pdf_sections:
+                match_csv_with_pdf([stmt], pdf_sections)
         
         # Build transaction list
         for stmt in self.statements:
@@ -671,6 +938,11 @@ class RevolutSource(Source):
     def _get_all_accounts(self) -> set:
         """Get all accounts used by this source."""
         return set(self.account_map.values())
+
+    @property
+    def name(self) -> str:
+        """Return the source name."""
+        return 'revolut'
 
     def get_example_key_value_pairs(
         self,
@@ -705,9 +977,77 @@ class RevolutSource(Source):
         target_account: str,
     ) -> Transaction:
         """Create Beancount transaction from Revolut transaction."""
-        # Determine payee and narration
-        payee = txn.description
-        narration = txn.transaction_type
+        # Normalize transaction type for display
+        normalized_type = normalize_transaction_type(txn.transaction_type)
+        
+        # Determine if this is an internal Revolut operation
+        desc = txn.description or ''
+        desc_lower = desc.lower()
+        has_external_account = txn.counterparty_iban or txn.counterparty_bban
+        is_internal = (
+            desc.startswith('To ') and not has_external_account or  # Internal transfers
+            desc.startswith('Credit card') or
+            desc.startswith('Apple Pay') or
+            'portfolio' in desc_lower or
+            desc.startswith('Exchanged') or
+            desc.startswith('From ') and not has_external_account or  # Internal from
+            'plan fee' in desc_lower or  # Ultra plan fee, Premium plan fee, etc.
+            'plan termination' in desc_lower or  # Plan termination refund
+            'refund' in desc_lower and not has_external_account or  # Other internal refunds
+            'fee' in desc_lower and not has_external_account  # Other internal fees
+        )
+        
+        # Determine payee and narration based on transaction type
+        if is_internal:
+            # Internal Revolut operations: payee = Revolut, narration = description
+            payee = 'Revolut'
+            narration = desc
+            counterparty_for_meta = None  # No counterparty for internal ops
+        elif txn.counterparty_name:
+            # External transfer with PDF data
+            payee = txn.counterparty_name
+            # Use PDF description as narration (e.g., "Open banking top-up")
+            # Fall back to reference, then transaction type
+            narration = txn.pdf_description if txn.pdf_description else (txn.reference if txn.reference else normalized_type)
+            counterparty_for_meta = txn.counterparty_name
+        else:
+            # External transaction without full PDF data
+            # Try to extract clean payee from description patterns
+            # "Transfer to PERSON NAME" -> "PERSON NAME"
+            # "Transfer from PERSON NAME" -> "PERSON NAME" 
+            # "Payment to MERCHANT" -> "MERCHANT"
+            extracted_payee = None
+            
+            # Check for Transfer to/from pattern
+            transfer_match = re.match(r'^Transfer\s+(?:to|from)\s+(.+)$', desc, re.IGNORECASE)
+            if transfer_match:
+                extracted_payee = transfer_match.group(1).strip()
+            
+            # Check for Payment to pattern
+            if not extracted_payee:
+                payment_match = re.match(r'^Payment\s+(?:to|from)\s+(.+)$', desc, re.IGNORECASE)
+                if payment_match:
+                    extracted_payee = payment_match.group(1).strip()
+            
+            # Use counterparty_address as payee if it looks like a name (not an address)
+            if not extracted_payee and txn.counterparty_address:
+                # If counterparty_address doesn't contain comma (indicating it's just a name)
+                if ',' not in txn.counterparty_address:
+                    extracted_payee = txn.counterparty_address
+            
+            payee = extracted_payee if extracted_payee else desc
+            # For transfers: prefer reference (transfer title like "dzięki za TGE") over pdf_description
+            # because pdf_description often just repeats "Transfer to NAME"
+            if extracted_payee and txn.reference:
+                narration = txn.reference
+            else:
+                narration = txn.pdf_description if txn.pdf_description else (txn.reference if txn.reference else normalized_type)
+            counterparty_for_meta = payee
+        
+        # If payee == narration, use transaction_type as narration to avoid redundancy
+        # e.g., "Google Play" "Google Play" -> "Google Play" "Card payment"
+        if payee and narration and payee.lower() == narration.lower():
+            narration = normalized_type
         
         # Build metadata
         account_id = f"{statement.account_type}_{txn.currency}"
@@ -718,18 +1058,29 @@ class RevolutSource(Source):
         meta[SOURCE_BANK_KEY] = 'Revolut'
         
         if txn.transaction_type:
-            meta[TRANSACTION_TYPE_KEY] = txn.transaction_type
+            meta[TRANSACTION_TYPE_KEY] = normalized_type
         
-        if txn.description:
-            meta[COUNTERPARTY_KEY] = txn.description
+        # Only add counterparty for non-internal transactions
+        if counterparty_for_meta:
+            meta[COUNTERPARTY_KEY] = counterparty_for_meta
+        
+        if txn.counterparty_iban:
+            meta[COUNTERPARTY_IBAN_KEY] = txn.counterparty_iban
+        
+        if txn.counterparty_bban:
+            meta[COUNTERPARTY_BBAN_KEY] = txn.counterparty_bban
         
         if txn.counterparty_address:
             meta[COUNTERPARTY_ADDRESS_KEY] = txn.counterparty_address
         
+        if txn.reference:
+            meta[REFERENCE_KEY] = txn.reference
+        
         if txn.card_number:
-            # Extract last 4 digits
-            card_last4 = txn.card_number[-4:] if len(txn.card_number) >= 4 else txn.card_number
-            meta[CARD_NUMBER_KEY] = card_last4
+            meta[CARD_NUMBER_KEY] = txn.card_number
+        
+        if txn.source_card:
+            meta[SOURCE_CARD_KEY] = txn.source_card
         
         if txn.original_amount:
             meta[ORIGINAL_AMOUNT_KEY] = txn.original_amount
@@ -746,8 +1097,21 @@ class RevolutSource(Source):
         if txn.iban_pl:
             meta[ACCOUNT_IBAN_PL_KEY] = txn.iban_pl
         
-        # Link to source document
+        # Balance after transaction
+        meta[BALANCE_KEY] = str(txn.balance_after)
+        
+        # Transaction dates from CSV (with full time)
+        if txn.started_date_raw:
+            meta['started_date'] = txn.started_date_raw
+        if txn.completed_date_raw:
+            meta['completed_date'] = txn.completed_date_raw
+        
+        # Link to source document(s)
         meta[SOURCE_DOC_KEY] = os.path.basename(statement.filename)
+        
+        # Add PDF as document_2 if transaction has PDF enrichment
+        if txn.pdf_filename:
+            meta['document_2'] = txn.pdf_filename
         
         # Create postings
         units = Amount(txn.amount, txn.currency)
@@ -761,15 +1125,51 @@ class RevolutSource(Source):
         )
         
         # FIXME posting for other side
-        fixme_units = Amount(-txn.amount, txn.currency)
-        fixme_posting = Posting(
-            account=FIXME_ACCOUNT,
-            units=fixme_units,
-            cost=None,
-            price=None,
-            flag=None,
-            meta=None,
-        )
+        # For FX transactions, use original currency with per-unit price
+        if txn.original_amount and txn.original_currency and txn.original_currency != txn.currency:
+            try:
+                orig_amount = Decimal(txn.original_amount.replace(',', ''))
+                # Sign should be opposite of main posting
+                if txn.amount < 0:
+                    orig_amount = orig_amount  # Positive (expense)
+                else:
+                    orig_amount = -orig_amount  # Negative (income)
+                
+                fixme_units = Amount(orig_amount, txn.original_currency)
+                # Calculate per-unit price: PLN_amount / original_amount
+                # E.g., 627.36 PLN / 151.05 USD = 4.1533 PLN per USD
+                per_unit_price = abs(txn.amount) / abs(orig_amount)
+                unit_price = Amount(per_unit_price.quantize(Decimal('0.0001')), txn.currency)
+                fixme_posting = Posting(
+                    account=FIXME_ACCOUNT,
+                    units=fixme_units,
+                    cost=None,
+                    price=unit_price,
+                    flag=None,
+                    meta=None,
+                )
+            except (ValueError, InvalidOperation, ZeroDivisionError):
+                # Fallback to simple posting
+                fixme_units = Amount(-txn.amount, txn.currency)
+                fixme_posting = Posting(
+                    account=FIXME_ACCOUNT,
+                    units=fixme_units,
+                    cost=None,
+                    price=None,
+                    flag=None,
+                    meta=None,
+                )
+        else:
+            # Non-FX: simple opposite posting in same currency
+            fixme_units = Amount(-txn.amount, txn.currency)
+            fixme_posting = Posting(
+                account=FIXME_ACCOUNT,
+                units=fixme_units,
+                cost=None,
+                price=None,
+                flag=None,
+                meta=None,
+            )
         
         # Transaction date
         txn_date = txn.completed_date or txn.started_date
@@ -882,6 +1282,44 @@ class RevolutSource(Source):
             if ref not in valid_ids and ref.startswith('revolut:'):
                 results.add_invalid_reference(
                     InvalidSourceReference(0, entries))
+        
+        # Generate Document directives for source CSV files
+        # (PDF files are used for enrichment only, CSV is the primary source)
+        seen_files: Set[str] = set()
+        for statement, txn in self.transactions:
+            if statement.filename in seen_files:
+                continue
+            seen_files.add(statement.filename)
+            
+            account_id = f"{statement.account_type}_{txn.currency}"
+            target_account = self._get_account_for_id(account_id)
+            if target_account is None:
+                continue
+            
+            # Find max date from this file
+            max_date = max(
+                (t.completed_date or t.started_date for s, t in self.transactions if s.filename == statement.filename),
+                default=datetime.date.today()
+            )
+            
+            results.add_pending_entry(
+                ImportResult(
+                    date=max_date,
+                    entries=[
+                        Document(
+                            meta=None,
+                            date=max_date,
+                            account=target_account,
+                            filename=statement.filename,  # Absolute path
+                            tags=EMPTY_SET,
+                            links=EMPTY_SET,
+                        )
+                    ],
+                    info=dict(
+                        type='text/csv',
+                        filename=os.path.basename(statement.filename),
+                    ),
+                ))
 
 
 def load(spec: dict, log_status):
