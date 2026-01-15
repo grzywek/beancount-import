@@ -1044,7 +1044,50 @@ class ZenSource(Source):
         
         # Create postings
         amount = Amount(txn.settlement_amount, txn.settlement_currency)
-        neg_amount = Amount(-txn.settlement_amount, txn.settlement_currency)
+        
+        # For unpaired FX transactions, create a posting in the target currency with price
+        is_unpaired_fx = (
+            txn.transaction_type == 'Exchange money' and 
+            txn.original_currency != txn.settlement_currency and
+            txn.original_amount != Decimal(0)
+        )
+        
+        if is_unpaired_fx:
+            # Calculate the per-unit price: settlement_amount / original_amount
+            # E.g., -1000 PLN / -268.65 USD = 3.7224 PLN per USD
+            per_unit_price = abs(txn.settlement_amount) / abs(txn.original_amount)
+            price_amount = Amount(per_unit_price, txn.settlement_currency)
+            
+            # The target posting uses -original_amount in original_currency
+            # (negating because it's the opposite leg of the transaction)
+            target_amount = Amount(-txn.original_amount, txn.original_currency)
+            
+            # Determine target account for the FX currency
+            target_account_id = f"{statement.iban}_{txn.original_currency}"
+            fx_target_account = self._get_account_for_id(target_account_id)
+            if fx_target_account is None:
+                # Fallback to FIXME if no account mapping exists for the currency
+                fx_target_account = FIXME_ACCOUNT
+            
+            second_posting = Posting(
+                account=fx_target_account,
+                units=target_amount,
+                cost=None,
+                price=price_amount,
+                flag=None,
+                meta=None,
+            )
+        else:
+            # Standard transaction - opposite posting to FIXME
+            neg_amount = Amount(-txn.settlement_amount, txn.settlement_currency)
+            second_posting = Posting(
+                account=FIXME_ACCOUNT,
+                units=neg_amount,
+                cost=None,
+                price=None,
+                flag=None,
+                meta=None,
+            )
 
         return Transaction(
             meta=None,
@@ -1063,14 +1106,7 @@ class ZenSource(Source):
                     flag=None,
                     meta=meta,
                 ),
-                Posting(
-                    account=FIXME_ACCOUNT,
-                    units=neg_amount,
-                    cost=None,
-                    price=None,
-                    flag=None,
-                    meta=None,
-                ),
+                second_posting,
             ],
         )
 
