@@ -200,6 +200,7 @@ interface PendingEntriesComponentState {
   highlightedIndex?: number;
   filterText: string;
   cachedEntries: Map<number, PendingEntry>;
+  lastGeneration: number;
 }
 
 export class PendingEntriesComponent extends React.PureComponent<
@@ -209,7 +210,8 @@ export class PendingEntriesComponent extends React.PureComponent<
   state: PendingEntriesComponentState = {
     highlightedIndex: this.props.highlightState.index,
     filterText: "",
-    cachedEntries: new Map()
+    cachedEntries: new Map(),
+    lastGeneration: -1
   };
 
   selectedRef = React.createRef<HTMLElement>();
@@ -249,9 +251,25 @@ export class PendingEntriesComponent extends React.PureComponent<
     return metadata ? metadata[0] : -1;
   };
 
-  // Get all filtered entries from cache
+  // Get all filtered entries from cache, clearing cache if generation changed
   private getFilteredEntries = (): Array<{ entry: PendingEntry, index: number }> => {
-    const { cachedEntries } = this.state;
+    const currentGeneration = this.getGeneration();
+    const { cachedEntries, lastGeneration } = this.state;
+
+    // Clear cache if generation changed (e.g., after accept/ignore)
+    if (currentGeneration !== lastGeneration && lastGeneration !== -1) {
+      this.setState({
+        cachedEntries: new Map(),
+        lastGeneration: currentGeneration
+      });
+      return [];
+    }
+
+    // Update generation tracking if first time
+    if (lastGeneration === -1 && currentGeneration !== -1) {
+      this.setState({ lastGeneration: currentGeneration });
+    }
+
     const result: Array<{ entry: PendingEntry, index: number }> = [];
 
     // Sort by index to maintain order
@@ -391,6 +409,8 @@ export class PendingEntriesComponent extends React.PureComponent<
   }
 
   highlightStateSubscription?: EventSubscription;
+  metadataSubscription?: EventSubscription;
+
   componentDidMount() {
     this.highlightStateSubscription = this.props.highlightState.emitter.addListener(
       "set",
@@ -398,11 +418,22 @@ export class PendingEntriesComponent extends React.PureComponent<
         this.setState({ highlightedIndex: this.props.highlightState.index });
       }
     );
+
+    // Subscribe to metadata changes to update filtered list after accept/ignore
+    this.metadataSubscription = this.props.listState.emitter.addListener(
+      "change",
+      () => {
+        // Force re-render when metadata changes
+        this.forceUpdate();
+      }
+    );
+
     window.addEventListener("keydown", this.handleKeyDown);
   }
 
   componentWillUnmount() {
     this.highlightStateSubscription!.remove();
+    this.metadataSubscription?.remove();
     window.removeEventListener("keydown", this.handleKeyDown);
   }
 
