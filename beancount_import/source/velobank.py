@@ -2357,17 +2357,16 @@ class VelobankSource(Source):
         matched_ids: Dict[str, List[Tuple[Transaction, Posting]]] = {}
 
         for entry in journal.all_entries:
-            if not isinstance(entry, Transaction):
-                continue
-            for posting in entry.postings:
-                if posting.meta is None:
-                    continue
-                # Check if posting belongs to any of our accounts
-                if posting.account not in all_accounts:
-                    continue
-                stmt_ref = posting.meta.get(SOURCE_REF_KEY)
-                if stmt_ref is not None:
-                    matched_ids.setdefault(stmt_ref, []).append((entry, posting))
+            if isinstance(entry, Transaction):
+                for posting in entry.postings:
+                    if posting.meta is None:
+                        continue
+                    # Check if posting belongs to any of our accounts
+                    if posting.account not in all_accounts:
+                        continue
+                    stmt_ref = posting.meta.get(SOURCE_REF_KEY)
+                    if stmt_ref is not None:
+                        matched_ids.setdefault(stmt_ref, []).append((entry, posting))
 
         # Process all transactions from all statements
         valid_ids = set()
@@ -2426,10 +2425,12 @@ class VelobankSource(Source):
 
         # Generate Document directives for source files
         # Files already have unique suffix from ensure_file_has_suffix during load
+        # Note: Duplicate detection is handled centrally in reconcile.py
         for statement in self.statements:
             if not statement.transactions:
                 continue
             
+            doc_basename = os.path.basename(statement.filename)
             target_account = self._get_account_for_iban(statement.account_iban)
             
             # Find max transaction date from this statement
@@ -2451,7 +2452,7 @@ class VelobankSource(Source):
                     ],
                     info=dict(
                         type='application/pdf',
-                        filename=os.path.basename(statement.filename),
+                        filename=doc_basename,
                     ),
                 ))
 

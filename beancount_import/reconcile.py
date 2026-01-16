@@ -411,6 +411,8 @@ class LoadedReconciler(object):
         self.balance_entries = dict(
         )  # type: Dict[Tuple[datetime.date, str, str], Decimal]
         self.price_values = set()  # type: Set[Tuple[datetime.date, str, Amount]]
+        # Set of existing Document filenames (basenames) for duplicate detection
+        self.document_basenames = set()  # type: Set[str]
         all_source_results = self._prepare_sources()
         self._preprocess_entries()
         self._match_sources(all_source_results)
@@ -469,6 +471,9 @@ class LoadedReconciler(object):
             elif isinstance(entry, Balance):
                 key = (entry.date, entry.account, entry.amount.currency)
                 self.balance_entries[key] = entry.amount.number
+            elif isinstance(entry, Document):
+                # Track document basenames to detect duplicates
+                self.document_basenames.add(os.path.basename(entry.filename))
 
     def is_posting_cleared(self, posting: Posting) -> bool:
         source = self.account_source_map.get(posting.account)
@@ -721,7 +726,11 @@ class LoadedReconciler(object):
                     only_balance_or_price = False
                 elif isinstance(entry, Document):
                     # Document entries should be individual entries (not grouped with balance/price)
-                    # They don't go through matching, just get added individually
+                    # Skip if Document for this file already exists in journal
+                    doc_basename = os.path.basename(entry.filename)
+                    if doc_basename in self.document_basenames:
+                        continue
+                    self.document_basenames.add(doc_basename)
                     only_balance_or_price = False
                 else:
                     pending_transaction_ids.add(id(entry))

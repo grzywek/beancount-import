@@ -345,9 +345,13 @@ def _parse_transaction(txn_data: dict, account_id: str, bank: str, source_filena
 
 
 def _generate_transaction_id(txn: EnableBankingTransaction) -> str:
-    """Generate unique transaction ID from entry_reference."""
-    # entry_reference should be unique per bank, but add bank prefix for safety
-    return f"{txn.bank}:{txn.entry_reference}"
+    """Generate unique transaction ID from entry_reference.
+    
+    Uses 'eb_' prefix to distinguish from dedicated bank importers.
+    E.g., 'eb_Revolut:ABC123' vs 'revolut:hash' from RevolutSource.
+    """
+    # eb_ prefix ensures no collision with dedicated importers
+    return f"eb_{txn.bank}:{txn.entry_reference}"
 
 
 def get_info(txn: EnableBankingTransaction) -> dict:
@@ -549,16 +553,15 @@ class EnableBankingSource(Source):
         matched_ids: Dict[str, List[Tuple[Transaction, Posting]]] = {}
 
         for entry in journal.all_entries:
-            if not isinstance(entry, Transaction):
-                continue
-            for posting in entry.postings:
-                if posting.meta is None:
-                    continue
-                if posting.account not in all_accounts:
-                    continue
-                ref = posting.meta.get(SOURCE_REF_KEY)
-                if ref is not None:
-                    matched_ids.setdefault(ref, []).append((entry, posting))
+            if isinstance(entry, Transaction):
+                for posting in entry.postings:
+                    if posting.meta is None:
+                        continue
+                    if posting.account not in all_accounts:
+                        continue
+                    ref = posting.meta.get(SOURCE_REF_KEY)
+                    if ref is not None:
+                        matched_ids.setdefault(ref, []).append((entry, posting))
 
         # Group transactions by account for balance assertions
         txns_by_account: Dict[str, List[EnableBankingTransaction]] = {}
@@ -665,10 +668,13 @@ class EnableBankingSource(Source):
         
         # Generate Document directives for source files
         # Files already have unique suffix from ensure_file_has_suffix during load
+        # Note: Duplicate detection is handled centrally in reconcile.py
         for (account_id, source_filename), max_date in doc_groups.items():
             target_account = self._get_account_for_id(account_id)
             if target_account is None:
                 continue
+            
+            doc_basename = os.path.basename(source_filename)
             
             # Use absolute path - SourceResults will convert to relative if needed
             results.add_pending_entry(
@@ -686,7 +692,7 @@ class EnableBankingSource(Source):
                     ],
                     info=dict(
                         type='application/json',
-                        filename=os.path.basename(source_filename),
+                        filename=doc_basename,
                     ),
                 ))
 
@@ -703,9 +709,10 @@ class EnableBankingSource(Source):
         txn_id = _generate_transaction_id(txn)
 
         # Build metadata
+        # Use 'EnableBanking/BANK' format to distinguish from dedicated importers
         meta = collections.OrderedDict([
             (SOURCE_REF_KEY, txn_id),
-            (SOURCE_BANK_KEY, txn.bank),
+            (SOURCE_BANK_KEY, f"EnableBanking/{txn.bank}"),
         ])
         
         # Add own account IBAN (extract from account_id format: IBAN_CURRENCY)

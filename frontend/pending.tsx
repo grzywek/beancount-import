@@ -194,13 +194,15 @@ interface PendingEntriesComponentProps {
   onSelect: (index: number) => void;
   selectedIndex?: number;
   highlightState: PendingEntryHighlightState;
+  serverConnection: any;  // For sending filter messages
+  filteredCount?: number | null;
+  filteredTotal?: number | null;
 }
 
 interface PendingEntriesComponentState {
   highlightedIndex?: number;
   filterText: string;
-  cachedEntries: Map<number, PendingEntry>;
-  lastGeneration: number;
+  lastGeneration: number;  // Track generation to detect accept/ignore
 }
 
 export class PendingEntriesComponent extends React.PureComponent<
@@ -210,13 +212,16 @@ export class PendingEntriesComponent extends React.PureComponent<
   state: PendingEntriesComponentState = {
     highlightedIndex: this.props.highlightState.index,
     filterText: "",
-    cachedEntries: new Map(),
     lastGeneration: -1
   };
 
   selectedRef = React.createRef<HTMLElement>();
   highlightedRef = React.createRef<HTMLElement>();
   filterInputRef = React.createRef<HTMLInputElement>();
+
+  // Cache of last valid filtered entries - prevents flash while data is loading
+  private lastFilteredEntries: Array<{ entry: PendingEntry, index: number }> = [];
+  private lastFilterText: string = "";  // Track which filter text the cache belongs to
 
   // Check if entry matches filter - only searches in payee and narration
   private matchesFilter = (entry: PendingEntry): boolean => {
@@ -251,35 +256,41 @@ export class PendingEntriesComponent extends React.PureComponent<
     return metadata ? metadata[0] : -1;
   };
 
-  // Get all filtered entries from cache, clearing cache if generation changed
+  // Get all filtered entries - with caching to prevent flash during data loading
   private getFilteredEntries = (): Array<{ entry: PendingEntry, index: number }> => {
-    const currentGeneration = this.getGeneration();
-    const { cachedEntries, lastGeneration } = this.state;
+    const { filterText } = this.state;
+    const trimmedFilter = filterText.trim();
 
-    // Clear cache if generation changed (e.g., after accept/ignore)
-    if (currentGeneration !== lastGeneration && lastGeneration !== -1) {
-      this.setState({
-        cachedEntries: new Map(),
-        lastGeneration: currentGeneration
-      });
+    if (!trimmedFilter) {
+      this.lastFilteredEntries = [];
       return [];
     }
 
-    // Update generation tracking if first time
-    if (lastGeneration === -1 && currentGeneration !== -1) {
-      this.setState({ lastGeneration: currentGeneration });
+    const currentGeneration = this.getGeneration();
+    const length = this.getListLength();
+    const cache = this.props.listState.cache;
+
+    // Request all data to be loaded
+    if (length > 0) {
+      cache.requestRange(currentGeneration, length, 0, length);
     }
 
+    // Filter entries using CURRENT indices from server cache
     const result: Array<{ entry: PendingEntry, index: number }> = [];
-
-    // Sort by index to maintain order
-    const sortedIndices = Array.from(cachedEntries.keys()).sort((a, b) => a - b);
-
-    for (const index of sortedIndices) {
-      const entry = cachedEntries.get(index);
+    for (let index = 0; index < length; index++) {
+      const entry = cache.get(currentGeneration, index);
       if (entry && this.matchesFilter(entry)) {
         result.push({ entry, index });
       }
+    }
+
+    // If we got results, cache them; otherwise return cached entries (to prevent flash)
+    if (result.length > 0) {
+      this.lastFilteredEntries = result;
+      return result;
+    } else if (this.lastFilteredEntries.length > 0) {
+      // Return cached entries while new data is loading
+      return this.lastFilteredEntries;
     }
 
     return result;
@@ -292,11 +303,6 @@ export class PendingEntriesComponent extends React.PureComponent<
   ) => {
     const { selectedIndex } = this.props;
     const { highlightedIndex } = this.state;
-
-    // Cache the entry when we see it
-    if (!this.state.cachedEntries.has(index)) {
-      this.state.cachedEntries.set(index, entry);
-    }
 
     return (
       <PendingEntryComponent
@@ -313,8 +319,8 @@ export class PendingEntriesComponent extends React.PureComponent<
   };
 
   private renderFilteredItem = (entry: PendingEntry, index: number) => {
-    const { selectedIndex } = this.props;
     const { highlightedIndex } = this.state;
+    const { selectedIndex } = this.props;
 
     return (
       <PendingEntryComponent
@@ -331,22 +337,23 @@ export class PendingEntriesComponent extends React.PureComponent<
 
   private handleFilterChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const newFilterText = event.target.value;
-
-    // When filter becomes active, request all items to cache them
-    if (newFilterText && !this.state.filterText) {
-      const length = this.getListLength();
-      const generation = this.getGeneration();
-      if (length > 0) {
-        this.props.listState.cache.requestRange(generation, length, 0, length);
-      }
-    }
-
     this.setState({ filterText: newFilterText });
+
+    // Send filter to server via WebSocket
+    this.props.serverConnection.send({
+      type: "set_filter",
+      value: { text: newFilterText }
+    });
   };
 
   private handleFilterKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
       this.setState({ filterText: "" });
+      // Clear filter on server
+      this.props.serverConnection.send({
+        type: "set_filter",
+        value: { text: "" }
+      });
       this.filterInputRef.current?.blur();
       event.preventDefault();
     }
@@ -361,19 +368,38 @@ export class PendingEntriesComponent extends React.PureComponent<
       return;
     }
 
+    const { filterText } = this.state;
+    const isFiltering = filterText.trim().length > 0;
+
     if (event.key === "/") {
       event.preventDefault();
       this.filterInputRef.current?.focus();
+      return;
+    }
+
+    // Handle [ ] navigation in filtered mode via server
+    if (isFiltering && (event.key === "[" || event.key === "]")) {
+      event.preventDefault();
+      event.stopImmediatePropagation();  // Prevent candidates.tsx from handling
+
+      // Send navigation request to server
+      this.props.serverConnection.send({
+        type: "filtered_skip",
+        value: { direction: event.key === "]" ? "next" : "prev" }
+      });
     }
   };
-
   render() {
     const { filterText } = this.state;
     const isFiltering = filterText.trim().length > 0;
 
-    // Get filtered entries for display
+    // Get filtered entries for display (client-side for rendering)
     const filteredEntries = isFiltering ? this.getFilteredEntries() : [];
-    const totalCount = this.getListLength();
+
+    // Use server-provided counts when available, fall back to client-side
+    const { filteredCount, filteredTotal } = this.props;
+    const displayFilteredCount = filteredCount ?? filteredEntries.length;
+    const displayTotalCount = filteredTotal ?? this.getListLength();
 
     return (
       <>
@@ -388,7 +414,7 @@ export class PendingEntriesComponent extends React.PureComponent<
           />
           {isFiltering && (
             <PendingFilterCount>
-              {filteredEntries.length} / {totalCount}
+              {displayFilteredCount} / {displayTotalCount}
             </PendingFilterCount>
           )}
         </PendingFilterWrapper>
@@ -410,6 +436,7 @@ export class PendingEntriesComponent extends React.PureComponent<
 
   highlightStateSubscription?: EventSubscription;
   metadataSubscription?: EventSubscription;
+  cacheSubscription?: EventSubscription;
 
   componentDidMount() {
     this.highlightStateSubscription = this.props.highlightState.emitter.addListener(
@@ -419,22 +446,69 @@ export class PendingEntriesComponent extends React.PureComponent<
       }
     );
 
-    // Subscribe to metadata changes to update filtered list after accept/ignore
+    // Subscribe to metadata changes - handle navigation after accept/ignore
     this.metadataSubscription = this.props.listState.emitter.addListener(
       "change",
       () => {
-        // Force re-render when metadata changes
-        this.forceUpdate();
+        const { filterText, lastGeneration } = this.state;
+        const isFiltering = filterText.trim().length > 0;
+        const currentGeneration = this.getGeneration();
+
+        // Track generation for first-time init
+        if (lastGeneration === -1 && currentGeneration !== -1) {
+          this.setState({ lastGeneration: currentGeneration });
+        }
+
+        // If generation changed AND filter is active, ensure we're on a filtered entry
+        if (isFiltering && currentGeneration !== lastGeneration && lastGeneration !== -1) {
+          this.setState({ lastGeneration: currentGeneration });
+
+          // Get current filtered entries with FRESH data
+          const filteredEntries = this.getFilteredEntries();
+          const filteredIndices = filteredEntries.map(e => e.index);
+          const currentIndex = this.props.selectedIndex || 0;
+
+          // Check if current selection is in filtered list
+          const isInFiltered = filteredIndices.indexOf(currentIndex) !== -1;
+
+          if (!isInFiltered && filteredIndices.length > 0) {
+            // Navigate to nearest filtered entry >= current index
+            let nextIndex = filteredIndices.find(i => i >= currentIndex);
+            if (nextIndex === undefined) {
+              // If none found >= current, pick the last one
+              nextIndex = filteredIndices[filteredIndices.length - 1];
+            }
+            this.props.onSelect(nextIndex);
+          }
+        }
+
+        // Force re-render when metadata changes (new data from server)
+        if (isFiltering) {
+          this.forceUpdate();
+        }
       }
     );
 
-    window.addEventListener("keydown", this.handleKeyDown);
+    // Subscribe to cache updates to refresh filtered view when data arrives
+    this.cacheSubscription = this.props.listState.cache.emitter.addListener(
+      "received",
+      () => {
+        // Force re-render when cache receives new data
+        if (this.state.filterText.trim()) {
+          this.forceUpdate();
+        }
+      }
+    );
+
+    // Use capture phase (third arg = true) to intercept [ ] before candidates.tsx
+    window.addEventListener("keydown", this.handleKeyDown, true);
   }
 
   componentWillUnmount() {
     this.highlightStateSubscription!.remove();
     this.metadataSubscription?.remove();
-    window.removeEventListener("keydown", this.handleKeyDown);
+    this.cacheSubscription?.remove();
+    window.removeEventListener("keydown", this.handleKeyDown, true);
   }
 
   private handleHover = (index?: number) => {

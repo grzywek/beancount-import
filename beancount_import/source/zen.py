@@ -700,16 +700,15 @@ class ZenSource(Source):
         matched_ids: Dict[str, List[Tuple[Transaction, Posting]]] = {}
 
         for entry in journal.all_entries:
-            if not isinstance(entry, Transaction):
-                continue
-            for posting in entry.postings:
-                if posting.meta is None:
-                    continue
-                if posting.account not in all_accounts:
-                    continue
-                ref = posting.meta.get(SOURCE_REF_KEY)
-                if ref is not None:
-                    matched_ids.setdefault(ref, []).append((entry, posting))
+            if isinstance(entry, Transaction):
+                for posting in entry.postings:
+                    if posting.meta is None:
+                        continue
+                    if posting.account not in all_accounts:
+                        continue
+                    ref = posting.meta.get(SOURCE_REF_KEY)
+                    if ref is not None:
+                        matched_ids.setdefault(ref, []).append((entry, posting))
 
         # Track for balance assertions
         balances_by_account: Dict[str, List[Tuple[datetime.date, Decimal, str]]] = {}
@@ -858,9 +857,12 @@ class ZenSource(Source):
 
         # Generate Document directives for source files
         # Files already have unique suffix from ensure_file_has_suffix during load
+        # Note: Duplicate detection is handled centrally in reconcile.py
         for statement in self.statements:
             if not statement.transactions:
                 continue
+            
+            doc_basename = os.path.basename(statement.filename)
             
             account_id = f"{statement.iban}_{statement.currency}"
             target_account = self._get_account_for_id(account_id)
@@ -886,7 +888,7 @@ class ZenSource(Source):
                     ],
                     info=dict(
                         type='text/csv',
-                        filename=os.path.basename(statement.filename),
+                        filename=doc_basename,
                     ),
                 ))
 

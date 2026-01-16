@@ -184,9 +184,8 @@ class AppComponent
     selectedTab: number;
     selectedDataTab: number;
   }) {
-    const newHash = `#${TabKeys[state.selectedTab]}+${
-      DataTabKeys[state.selectedDataTab]
-    }`;
+    const newHash = `#${TabKeys[state.selectedTab]}+${DataTabKeys[state.selectedDataTab]
+      }`;
     if (newHash !== location.hash) {
       history.pushState(null, "", newHash);
     }
@@ -311,7 +310,7 @@ class AppComponent
                     <Tab>
                       Candidates
                       {this.state.candidates != null &&
-                      this.state.candidates.candidates.length > 0
+                        this.state.candidates.candidates.length > 0
                         ? ` (${this.state.candidates.candidates.length})`
                         : undefined}
                     </Tab>
@@ -386,6 +385,9 @@ class AppComponent
                         listState={this.pendingListState}
                         highlightState={this.pendingHighlightState}
                         onSelect={this.handleSelectPending}
+                        serverConnection={this.props.serverConnection}
+                        filteredCount={this.state.filtered_count}
+                        filteredTotal={this.state.filtered_total}
                       />
                     )}
                   </AppTabPanel>

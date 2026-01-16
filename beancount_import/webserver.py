@@ -397,6 +397,22 @@ class WebSocketHandler(tornado.websocket.WebSocketHandler):
         except:
             traceback.print_exc()
 
+    def on_message_set_filter(self, msg):
+        """Handle filter text from frontend."""
+        try:
+            filter_text = msg.get('text', '').strip().lower()
+            self.application.set_filter(filter_text)
+        except:
+            traceback.print_exc()
+
+    def on_message_filtered_skip(self, msg):
+        """Handle keyboard navigation within filtered list."""
+        try:
+            direction = msg.get('direction', 'next')  # 'next' or 'prev'
+            self.application.navigate_filtered(direction)
+        except:
+            traceback.print_exc()
+
 
 class GetFileHandler(tornado.web.RequestHandler):
     def get(self):
@@ -449,6 +465,10 @@ class Application(tornado.web.Application):
         self.current_state_generation = dict()
         self.generation = 0
         self.skip_ids = None
+        
+        # Server-side filter state
+        self.filter_text = ""  # Current filter text (lowercase, trimmed)
+        self.filtered_indices = None  # List of indices that match filter, or None if no filter
 
         self.log_status('Initializing')
 
@@ -563,6 +583,37 @@ class Application(tornado.web.Application):
 
         self.current_pending = loaded_reconciler.pending_data
         self.current_uncleared = loaded_reconciler.uncleared_postings
+        
+        # Update filtered indices after pending data changes
+        if new_pending and self.filter_text:
+            old_index = self.current_state.get('pending_index')
+            self._update_filtered_indices()
+            
+            # Update filtered count in state
+            kwargs.update(
+                filtered_count=len(self.filtered_indices) if self.filtered_indices else 0,
+                filtered_total=len(self.current_pending) if self.current_pending else 0
+            )
+            
+            # If filter active, navigate to next filtered entry
+            if self.filtered_indices:
+                # Find the first filtered index >= old_index (which was removed, so shifted)
+                # The old entry was removed, so we look for first filtered entry at or after that position
+                next_filtered = None
+                for fi in self.filtered_indices:
+                    if fi >= (old_index if old_index else 0):
+                        next_filtered = fi
+                        break
+                if next_filtered is None and self.filtered_indices:
+                    # If no match, use last filtered entry
+                    next_filtered = self.filtered_indices[-1]
+                
+                if next_filtered is not None:
+                    # Override the default navigation with filtered navigation
+                    self.skip_ids = loaded_reconciler.get_skip_ids_by_index(next_filtered)
+                    self.next_candidates, index, self.skip_ids = loaded_reconciler.get_next_candidates(
+                        self.skip_ids)
+        
         if self.next_candidates is None:
             self.set_state(candidates=None, pending_index=None, **kwargs)
         else:
@@ -597,6 +648,83 @@ class Application(tornado.web.Application):
     def log_status(self, message):
         logging.info(message)
         self.set_state(message=message)
+
+    def set_filter(self, filter_text: str):
+        """Set the filter text and update filtered indices."""
+        self.filter_text = filter_text
+        self._update_filtered_indices()
+        
+        # Broadcast filter state to all clients
+        if filter_text:
+            filtered_count = len(self.filtered_indices) if self.filtered_indices else 0
+            total_count = len(self.current_pending) if self.current_pending else 0
+        else:
+            filtered_count = None
+            total_count = None
+        
+        self.set_state(
+            filter_text=filter_text,
+            filtered_count=filtered_count,
+            filtered_total=total_count
+        )
+        
+        # When filter is applied, always navigate to first filtered entry
+        if filter_text and self.filtered_indices:
+            self._navigate_to_filtered_entry(0)
+
+    def _update_filtered_indices(self):
+        """Recompute filtered_indices based on current filter_text and pending data."""
+        if not self.filter_text or not self.current_pending:
+            self.filtered_indices = None
+            return
+        
+        self.filtered_indices = []
+        search = self.filter_text.lower()
+        for i, pending in enumerate(self.current_pending):
+            # Search in formatted text which contains payee/narration
+            if search in pending.formatted.lower():
+                self.filtered_indices.append(i)
+
+    def _navigate_to_filtered_entry(self, filtered_pos: int):
+        """Navigate to the entry at filtered_pos in the filtered list."""
+        if not self.filtered_indices or filtered_pos < 0:
+            return
+        if filtered_pos >= len(self.filtered_indices):
+            filtered_pos = len(self.filtered_indices) - 1
+        
+        real_index = self.filtered_indices[filtered_pos]
+        loaded_reconciler = self.reconciler.loaded_future.result()
+        self.skip_ids = loaded_reconciler.get_skip_ids_by_index(real_index)
+        self.get_next_candidates(new_pending=False)
+
+    def navigate_filtered(self, direction: str):
+        """Navigate within filtered list. direction is 'next' or 'prev'."""
+        if not self.filter_text or not self.filtered_indices:
+            return
+        
+        current_index = self.current_state.get('pending_index')
+        if current_index is None:
+            return
+        
+        # Find current position in filtered list
+        try:
+            current_pos = self.filtered_indices.index(current_index)
+        except ValueError:
+            # Current index not in filtered list, find closest
+            current_pos = 0
+            for i, fi in enumerate(self.filtered_indices):
+                if fi >= current_index:
+                    current_pos = i
+                    break
+        
+        # Navigate
+        if direction == 'next':
+            new_pos = min(current_pos + 1, len(self.filtered_indices) - 1)
+        else:  # prev
+            new_pos = max(current_pos - 1, 0)
+        
+        if new_pos != current_pos or self.filtered_indices[new_pos] != current_index:
+            self._navigate_to_filtered_entry(new_pos)
 
     def handle_change_candidate(self, msg):
         try:

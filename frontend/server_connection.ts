@@ -159,6 +159,10 @@ export interface ServerState {
   errors: GenerationAndCount | null;
   uncleared: GenerationAndCount | null;
   invalid: GenerationAndCount | null;
+  // Server-side filter state
+  filter_text?: string;
+  filtered_count?: number | null;
+  filtered_total?: number | null;
 }
 
 interface SkipMessage {
@@ -213,6 +217,16 @@ interface SetFileContentsMessage {
   value: { filename: string; contents: string };
 }
 
+interface SetFilterMessage {
+  type: "set_filter";
+  value: { text: string };
+}
+
+interface FilteredSkipMessage {
+  type: "filtered_skip";
+  value: { direction: "next" | "prev" };
+}
+
 type ServerAction =
   | SkipMessage
   | RetrainMessage
@@ -221,7 +235,9 @@ type ServerAction =
   | GetFileContentsMessage
   | SetFileContentsMessage
   | WatchFileMessage
-  | UnwatchFileMessage;
+  | UnwatchFileMessage
+  | SetFilterMessage
+  | FilteredSkipMessage;
 
 type ServerStateListener = (state: Partial<ServerState>) => void;
 
@@ -272,7 +288,7 @@ export class ServerListCache<T> {
     (startIndex: number, endIndex: number, generation: number) => void
   >();
 
-  constructor(private dataType: ServerDataType, private blockSize = 10) {}
+  constructor(private dataType: ServerDataType, private blockSize = 10) { }
 
   requestRange(
     generation: number,
@@ -358,8 +374,7 @@ export class ServerListCache<T> {
             return;
           }
           console.log(
-            `Error retrieving ${
-              this.dataType
+            `Error retrieving ${this.dataType
             }, ${generation}, ${startIndex}, ${endIndex}: ${error}`
           );
           setTimeout(() => {
