@@ -582,21 +582,24 @@ class ZenSource(Source):
     def _find_fx_pairs(self) -> Tuple[List[FxPair], set, set]:
         """Find matching FX transaction pairs across all statements.
         
-        When exchanging PLN to EUR, Zen creates two entries:
-        - PLN file: debit of -28.14 PLN (settlement), original -6.74 EUR
-        - EUR file: credit of +6.74 EUR (settlement), original 28.14 PLN
+        When exchanging PLN to USD, Zen creates two entries:
+        - PLN file: debit of -1000.00 PLN (settlement), original -268.65 USD, rate 0.268659
+        - USD file: credit of +268.65 USD (settlement), original 268.65 USD(!), rate 0.268659
         
-        This method finds these pairs by matching:
+        Note: Zen's export has a bug where the target side shows original_amount equal
+        to settlement_amount instead of the source currency amount. We work around this
+        by matching on:
         - Same date
-        - Same currency_rate
-        - |source.settlement_amount| == |target.original_amount|
+        - Same currency_rate (non-1.0)
+        - Different currencies
+        - Opposite signs (source negative, target positive)
         - |source.original_amount| == |target.settlement_amount|
         
         Returns:
             Tuple of:
             - List of matched FxPair objects
-            - Set of (iban, currency, line_number) tuples for matched source txns
-            - Set of (iban, currency, line_number) tuples for matched target txns
+            - Set of (iban, date, settlement_amount, balance_after, currency) for matched source txns
+            - Set of (iban, date, settlement_amount, balance_after, currency) for matched target txns
         """
         pairs: List[FxPair] = []
         matched_source: set = set()
@@ -609,7 +612,7 @@ class ZenSource(Source):
                 fx_transactions.append((statement, txn))
         
         # Group by date and rate for efficient matching
-        # Key: (date, currency_rate) -> list of (statement, txn, is_source)
+        # Key: (date, currency_rate) -> list of (statement, txn)
         by_date_rate: Dict[Tuple[datetime.date, Decimal], List[Tuple[StatementInfo, ZenTransaction]]] = {}
         for statement, txn in fx_transactions:
             key = (txn.date, txn.currency_rate)
@@ -617,13 +620,16 @@ class ZenSource(Source):
         
         # Match within each group
         for (date, rate), group in by_date_rate.items():
+            # Skip transactions with rate 1.0 - these are same-currency or broken exports
+            if rate == D('1.0'):
+                continue
+                
             # Split into potential sources (negative settlement) and targets (positive settlement)
             sources = [(s, t) for s, t in group if t.settlement_amount < ZERO]
             targets = [(s, t) for s, t in group if t.settlement_amount > ZERO]
             
             for src_stmt, src_txn in sources:
                 # Unique key based on transaction data (stable regardless of file/line changes)
-                # Format: (iban, date, settlement_amount, balance_after, currency)
                 src_key = (src_stmt.iban, src_txn.date, src_txn.settlement_amount, 
                            src_txn.balance_after, src_stmt.currency)
                 if src_key in matched_source:
@@ -636,13 +642,14 @@ class ZenSource(Source):
                     if tgt_key in matched_target:
                         continue
                     
-                    # Check amount symmetry:
-                    # source.settlement_amount should equal -target.original_amount
-                    # source.original_amount should equal -target.settlement_amount
-                    if (abs(src_txn.settlement_amount) == abs(tgt_txn.original_amount) and
-                        abs(src_txn.original_amount) == abs(tgt_txn.settlement_amount) and
-                        src_stmt.currency != tgt_stmt.currency):  # Must be different currencies
-                        
+                    # Must be different currencies
+                    if src_stmt.currency == tgt_stmt.currency:
+                        continue
+                    
+                    # Match based on: |source.original_amount| == |target.settlement_amount|
+                    # This works because source.original_amount contains the target currency amount
+                    # Example: PLN source has original_amount=-268.65 USD, USD target has settlement=+268.65 USD
+                    if abs(src_txn.original_amount) == abs(tgt_txn.settlement_amount):
                         # Check if this is a reversal
                         is_reversal = 'reversal' in src_txn.description.lower()
                         

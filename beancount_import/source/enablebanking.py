@@ -371,6 +371,7 @@ class EnableBankingSource(Source):
         account_map: Optional[Dict[str, str]] = None,
         default_account: Optional[str] = None,
         banks: Optional[List[str]] = None,
+        exclude_banks: Optional[List[str]] = None,
         **kwargs,
     ) -> None:
         """Initialize the EnableBanking source.
@@ -381,6 +382,8 @@ class EnableBankingSource(Source):
             default_account: Fallback account when account not in account_map.
             banks: Optional list of bank subdirectory names to import (e.g., ['mbank', 'revolut']).
                    If not specified, all bank subdirectories are imported.
+            exclude_banks: Optional list of bank subdirectory names to exclude.
+                          Use this when you have dedicated importers for specific banks (e.g., ['Revolut']).
             **kwargs: Additional arguments passed to Source.
         """
         super().__init__(**kwargs)
@@ -389,6 +392,7 @@ class EnableBankingSource(Source):
         self.account_map: Dict[str, str] = account_map or {}
         self.default_account = default_account
         self.banks = banks  # None means all banks
+        self.exclude_banks = set(exclude_banks or [])  # Banks to skip
         
         if not self.default_account and not self.account_map:
             raise ValueError(
@@ -417,6 +421,11 @@ class EnableBankingSource(Source):
             
             # Filter by banks list if specified
             if self.banks is not None and bank_name not in self.banks:
+                continue
+            
+            # Skip excluded banks (e.g., when using dedicated importers)
+            if bank_name in self.exclude_banks:
+                self.log_status(f'enablebanking: skipping excluded bank: {bank_name}')
                 continue
             
             # Load accounts.json
