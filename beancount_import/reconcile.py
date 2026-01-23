@@ -271,7 +271,7 @@ def get_filename_from_map(account_map: List[Tuple[str, str]], account_name: str,
 
 class EntryFileSelector(object):
     def __init__(self, default_map, open_map, balance_map, price_output,
-                 commodity_output, document_output, default_output):
+                 commodity_output, document_output, custom_output, default_output):
         self.default_map = default_map
         self.open_map = open_map
         self.balance_map = balance_map
@@ -285,6 +285,9 @@ class EntryFileSelector(object):
         if document_output is None:
             document_output = default_output
         self.document_output = document_output
+        if custom_output is None:
+            custom_output = default_output
+        self.custom_output = custom_output
 
     def __call__(self, entry):
         if isinstance(entry, Open) or isinstance(entry, Close):
@@ -306,6 +309,8 @@ class EntryFileSelector(object):
             return self.commodity_output
         if isinstance(entry, Document):
             return self.document_output
+        if isinstance(entry, Custom):
+            return self.custom_output
         return self.default_output
 
     @staticmethod
@@ -315,6 +320,7 @@ class EntryFileSelector(object):
             price_output=options['price_output'],
             commodity_output=options.get('commodity_output'),
             document_output=options.get('document_output'),
+            custom_output=options.get('custom_output'),
             open_map=options['open_account_output_map'],
             default_output=options['default_output'],
             balance_map=options['balance_account_output_map'])
@@ -335,6 +341,9 @@ def get_entry_file_selector_argparser(kwargs):
     ap.add_argument(
         '--document_output',
         help='Beancount output file to which document entries will be appended')
+    ap.add_argument(
+        '--custom_output',
+        help='Beancount output file to which custom entries (stock splits, etc.) will be appended')
     ap.add_argument(
         '--open_account_output_map',
         help='Beancount output file to which matching accounts will be appended',
