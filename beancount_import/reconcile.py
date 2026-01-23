@@ -10,7 +10,7 @@ import string
 import random
 import pickle
 
-from beancount.core.data import Transaction, Posting, Balance, Open, Close, Price, Commodity, Document, Directive, Entries, Amount
+from beancount.core.data import Transaction, Posting, Balance, Open, Close, Price, Commodity, Document, Custom, Directive, Entries, Amount
 from beancount.core.flags import FLAG_PADDING
 from beancount.core.number import MISSING, Decimal, ZERO
 import beancount.parser.printer
@@ -731,6 +731,10 @@ class LoadedReconciler(object):
                     if doc_basename in self.document_basenames:
                         continue
                     self.document_basenames.add(doc_basename)
+                    only_balance_or_price = False
+                elif isinstance(entry, Custom):
+                    # Custom directives (e.g., autobean.stock_split) should be individual entries
+                    # Don't add to posting_db, treat as individual entry
                     only_balance_or_price = False
                 else:
                     pending_transaction_ids.add(id(entry))
