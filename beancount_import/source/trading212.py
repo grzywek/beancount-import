@@ -2113,13 +2113,12 @@ class Trading212Source(DescriptionBasedSource):
     def _make_corporate_action_entry(self, ca: CorporateAction) -> Custom:
         """Create a custom autobean.stock_split directive for a corporate action.
         
-        Format: 2024-06-10 custom "autobean.stock_split" Assets:Broker:Trading212 10 NVDA
+        Format: 2024-06-10 custom "autobean.stock_split" 10 NVDA
         
         For forward splits (10:1), ratio = 10 (10 new shares per 1 old)
         For reverse splits (1:30), ratio = 1/30 ≈ 0.0333... (0.033 new shares per 1 old)
         """
         symbol = self._get_beancount_symbol(ca.ticker, ca.isin)
-        symbol_account = f"{self.investment_account}:{symbol}"
         
         # Calculate ratio: new shares per old share
         if ca.action_type == "split":
@@ -2142,11 +2141,12 @@ class Trading212Source(DescriptionBasedSource):
         if ca.note:
             meta["note"] = ca.note
         
-        # Custom directive values: account, ratio, commodity
+        # Custom directive format: custom "autobean.stock_split" ratio COMMODITY
+        # Values must be properly typed for beancount printer
+        from beancount.core.amount import Amount as BcAmount
         values = [
-            symbol_account,
-            ratio,
-            symbol,
+            ratio,  # Decimal - ratio of new shares to old
+            symbol,  # String - commodity symbol
         ]
         
         return Custom(
