@@ -64,7 +64,7 @@ from typing import (
 
 
 from beancount.core.amount import Amount
-from beancount.core.data import Balance, Commodity, Directive, Posting, Transaction, TxnPosting
+from beancount.core.data import Balance, Commodity, Custom, Directive, Posting, Transaction, TxnPosting
 from beancount.core.number import D
 
 from beancount_import.journal_editor import JournalEditor
@@ -479,6 +479,7 @@ class Trading212Source(DescriptionBasedSource):
         interest_income_account: str = "Income:Interest",
         commodity_output: Optional[str] = None,  # Path to output commodities.beancount
         log_status: LogStatusCallable = lambda x: None,
+        **kwargs,  # Accept extra config params (e.g., 'description')
     ) -> None:
         super().__init__(log_status)
         self.data_directory = directory
@@ -2109,6 +2110,52 @@ class Trading212Source(DescriptionBasedSource):
             diff_amount=None,
         )
 
+    def _make_corporate_action_entry(self, ca: CorporateAction) -> Custom:
+        """Create a custom autobean.stock_split directive for a corporate action.
+        
+        Format: 2024-06-10 custom "autobean.stock_split" Assets:Broker:Trading212 10 NVDA
+        
+        For forward splits (10:1), ratio = 10 (10 new shares per 1 old)
+        For reverse splits (1:30), ratio = 1/30 ≈ 0.0333... (0.033 new shares per 1 old)
+        """
+        symbol = self._get_beancount_symbol(ca.ticker, ca.isin)
+        symbol_account = f"{self.investment_account}:{symbol}"
+        
+        # Calculate ratio: new shares per old share
+        if ca.action_type == "split":
+            # Forward split: e.g., 10:1 means 10 new shares per 1 old
+            ratio = D(str(ca.ratio_from)) / D(str(ca.ratio_to))
+        elif ca.action_type == "reverse_split":
+            # Reverse split: e.g., 1:30 means 1 new share per 30 old
+            ratio = D(str(ca.ratio_to)) / D(str(ca.ratio_from))
+        else:
+            ratio = D("1")
+        
+        # Create unique ref for matching
+        ca_ref = f"{ca.isin}:{ca.date}:{ca.action_type}"
+        
+        meta = {
+            "filename": "<trading212>",
+            "lineno": 0,
+            "corporate_action_ref": ca_ref,
+        }
+        if ca.note:
+            meta["note"] = ca.note
+        
+        # Custom directive values: account, ratio, commodity
+        values = [
+            symbol_account,
+            ratio,
+            symbol,
+        ]
+        
+        return Custom(
+            meta=meta,
+            date=ca.date,
+            type="autobean.stock_split",
+            values=values,
+        )
+
     def get_example_key_value_pairs(
         self, transaction: Transaction, posting: Posting
     ) -> Dict[str, Union[str, Sequence[str]]]:
@@ -2300,6 +2347,40 @@ class Trading212Source(DescriptionBasedSource):
         
         # Add commodity directives as pending entries (to be confirmed in UI)
         self._add_commodity_entries(journal, results)
+        
+        # =====================================================================
+        # CORPORATE ACTIONS (from JSON - generate custom stock_split directives)
+        # =====================================================================
+        
+        if self._corporate_actions:
+            # Collect existing corporate action refs from journal
+            matched_ca_refs = set()
+            for entry in journal.all_entries:
+                if isinstance(entry, Custom) and entry.type == "autobean.stock_split":
+                    # Extract ref from meta if present
+                    if entry.meta and "corporate_action_ref" in entry.meta:
+                        matched_ca_refs.add(entry.meta["corporate_action_ref"])
+            
+            for ca in self._corporate_actions:
+                # Create unique ref for this corporate action
+                ca_ref = f"{ca.isin}:{ca.date}:{ca.action_type}"
+                
+                if ca_ref in matched_ca_refs:
+                    continue
+                
+                # Only generate for splits (forward and reverse)
+                if ca.action_type in ("split", "reverse_split"):
+                    custom_entry = self._make_corporate_action_entry(ca)
+                    results.add_pending_entry(ImportResult(
+                        date=ca.date,
+                        entries=[custom_entry],
+                        info={
+                            "type": "trading212_corporate_action",
+                            "action_type": ca.action_type,
+                            "ticker": ca.ticker,
+                            "isin": ca.isin,
+                        },
+                    ))
         
         # Generate control report to check for discrepancies
         # Report is saved to data_directory
