@@ -2280,6 +2280,17 @@ class Trading212Source(DescriptionBasedSource):
                     continue
                 
                 if txn:
+                    # Validate that all postings have accounts (debug None account issue)
+                    has_none_account = any(p.account is None for p in txn.postings)
+                    if has_none_account:
+                        print(f"[Trading212] ERROR: Transaction has None account!", flush=True)
+                        print(f"  Action: {action}", flush=True)
+                        print(f"  Transaction ID: {csv_txn.transaction_id}", flush=True)
+                        print(f"  Postings:", flush=True)
+                        for i, p in enumerate(txn.postings):
+                            print(f"    [{i}] account={p.account}, units={p.units}", flush=True)
+                        continue  # Skip this transaction
+                    
                     results.add_pending_entry(ImportResult(
                         date=txn.date,
                         entries=[txn],
