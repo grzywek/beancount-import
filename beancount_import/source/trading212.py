@@ -493,6 +493,13 @@ class Trading212Source(DescriptionBasedSource):
         self.interest_income_account = interest_income_account
         self.commodity_output = commodity_output
         
+        # Debug logging for account configuration
+        print(f"[Trading212] Account configuration:", flush=True)
+        print(f"  cash_account: {self.cash_account}", flush=True)
+        print(f"  investment_account: {self.investment_account}", flush=True)
+        print(f"  dividend_income_account: {self.dividend_income_account}", flush=True)
+        print(f"  capital_gains_account: {self.capital_gains_account}", flush=True)
+        
         # Verify data directory exists
         if not os.path.isdir(directory):
             raise Trading212DataError(f"Data directory does not exist: {directory}")
