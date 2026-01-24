@@ -47,6 +47,7 @@ DEPRECATED (no longer used - all data comes from CSV):
 import csv
 import datetime
 import glob
+import hashlib
 import json
 import os
 from dataclasses import dataclass, asdict
@@ -64,7 +65,7 @@ from typing import (
 
 
 from beancount.core.amount import Amount
-from beancount.core.data import Balance, Commodity, Custom, Directive, Posting, Transaction, TxnPosting
+from beancount.core.data import Balance, Commodity, Custom, Directive, Document, Posting, Transaction, TxnPosting, EMPTY_SET
 from beancount.core.number import D
 
 from beancount_import.journal_editor import JournalEditor
@@ -79,8 +80,17 @@ from beancount_import.source.description_based_source import (
 from beancount_import.unbook import group_postings_by_meta, unbook_postings
 
 
-# Metadata keys for matching
-POSTING_META_ORDER_ID_KEY = "trading212_order_id"
+# Metadata keys (standardized across all bank sources)
+SOURCE_REF_KEY = 'source_ref'  # Unique transaction reference (format: "trading212:TXID")
+SOURCE_BANK_KEY = 'source_bank'  # Bank name for this source
+TRANSACTION_TYPE_KEY = 'transaction_type'  # Transaction type
+TICKER_KEY = 'ticker'  # Stock ticker
+ISIN_KEY = 'isin'  # ISIN code
+INSTRUMENT_NAME_KEY = 'instrument_name'  # Instrument name
+SOURCE_DOC_KEY = 'document'  # Link to source document file
+
+# Legacy keys for backward compatibility (matching old transactions)
+POSTING_META_ORDER_ID_KEY = SOURCE_REF_KEY
 POSTING_META_DIVIDEND_REF_KEY = "trading212_dividend_ref"
 POSTING_META_TRANSACTION_REF_KEY = "trading212_transaction_ref"
 
@@ -460,6 +470,8 @@ class CsvTransaction:
     transaction_fee_currency: Optional[str]
     finra_fee: Optional[Decimal]
     finra_fee_currency: Optional[str]
+    # Source file
+    source_file: Optional[str] = None  # CSV filename this transaction came from
 
 
 class Trading212Source(DescriptionBasedSource):
@@ -846,11 +858,12 @@ class Trading212Source(DescriptionBasedSource):
                         txn_id = row.get("ID", "")
                         
                         # Generate synthetic ID for transactions without ID (e.g., dividends)
-                        # Use action + time + ticker as a unique identifier
+                        # Use short hash of action + time + ticker for a clean unique identifier
                         if not txn_id:
                             ticker = row.get("Ticker", "")
                             isin = row.get("ISIN", "")
-                            txn_id = f"{action}_{time_str}_{ticker or isin}"
+                            raw_id = f"{action}_{time_str}_{ticker or isin}"
+                            txn_id = hashlib.sha256(raw_id.encode()).hexdigest()[:12]
                         
                         # Skip if already seen (dedupe across overlapping CSV files)
                         if txn_id in transactions:
@@ -885,6 +898,7 @@ class Trading212Source(DescriptionBasedSource):
                             transaction_fee_currency=safe_str(row.get("Currency (Transaction fee)")),
                             finra_fee=safe_decimal(row.get("Finra fee", "")),
                             finra_fee_currency=safe_str(row.get("Currency (Finra fee)")),
+                            source_file=csv_path,
                         )
             except Exception as e:
                 print(f"  [Trading212] Error parsing {csv_path}: {e}", flush=True)
@@ -1015,17 +1029,18 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{order.side} {symbol} {order.filled_quantity} @ {order.filled_price}"
         
         meta = {
-            "trading212_desc": source_desc,
+            SOURCE_REF_KEY: f"trading212:{order.order_id}",
+            SOURCE_BANK_KEY: "Trading212",
             POSTING_META_ORDER_ID_KEY: str(order.order_id),
         }
         
         # Add all available order metadata
-        meta["trading212_api_side"] = order.side
+        meta["order_side"] = order.side
         if order.filled_quantity:
             meta["filled_quantity"] = str(order.filled_quantity)
         if order.filled_price:
             meta["filled_price"] = str(order.filled_price)
-        meta["trading212_api_currency"] = order.currency
+        meta["order_currency"] = order.currency
         if order.account_currency != order.currency:
             meta["account_currency"] = order.account_currency
         if order.fx_rate and order.fx_rate != D("1"):
@@ -1033,11 +1048,11 @@ class Trading212Source(DescriptionBasedSource):
         if order.net_value is not None:
             meta["net_value"] = str(order.net_value)
         if order.realized_pnl is not None and order.realized_pnl != D("0"):
-            meta["trading212_realized_pnl"] = str(order.realized_pnl)
+            meta["realized_pnl"] = str(order.realized_pnl)
         if order.filled_at:
             meta["filled_at"] = order.filled_at.isoformat()
         if order.created_at:
-            meta["trading212_api_created_at"] = order.created_at.isoformat()
+            meta["order_created_at"] = order.created_at.isoformat()
         
         # Add pie names if ticker is in any pies (comma-separated if multiple)
         pies = self._get_pies_for_ticker(order.ticker)
@@ -1134,7 +1149,7 @@ class Trading212Source(DescriptionBasedSource):
             flag="*",
             payee="TRADING 212",
             narration=narration,
-            tags=frozenset({"imported"}),
+            tags=frozenset(),
             links=frozenset(),
             postings=postings,
         )
@@ -1158,12 +1173,12 @@ class Trading212Source(DescriptionBasedSource):
         
         # Simplified metadata for pending orders
         meta = {
-            "trading212_order_id": str(order.order_id),
-            "trading212_order_status": order.status,
-            "trading212_order_desc": source_desc,
+            SOURCE_REF_KEY: str(order.order_id),
+            "order_status": order.status,
+            "order_desc": source_desc,
         }
         if order.created_at:
-            meta["trading212_order_created_at"] = order.created_at.isoformat()
+            meta["order_created_at"] = order.created_at.isoformat()
         
         postings = []
         
@@ -1237,7 +1252,7 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212-forecast>",
                 "lineno": 0,
-                "trading212_order_id": str(order.order_id),
+                SOURCE_REF_KEY: str(order.order_id),
             },
             date=date,
             flag="!",  # Pending flag
@@ -1255,7 +1270,8 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"Dividend {symbol} {dividend.amount} {dividend.currency}"
         
         meta = {
-            "trading212_desc": source_desc,
+            SOURCE_REF_KEY: f"trading212:{dividend.reference}",
+            SOURCE_BANK_KEY: "Trading212",
             POSTING_META_DIVIDEND_REF_KEY: dividend.reference,
         }
         
@@ -1307,7 +1323,7 @@ class Trading212Source(DescriptionBasedSource):
             flag="*",
             payee="TRADING 212",
             narration=narration,
-            tags=frozenset({"imported"}),
+            tags=frozenset(),
             links=frozenset(),
             postings=postings,
         )
@@ -1319,14 +1335,14 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{txn.transaction_type} {txn.amount} {txn.currency}"
         
         meta = {
-            "trading212_desc": source_desc,
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             POSTING_META_TRANSACTION_REF_KEY: txn.reference,
         }
         
         # Add all available transaction metadata
         meta["transaction_type"] = txn.transaction_type
         if txn.date_time:
-            meta["trading212_time"] = txn.date_time.isoformat()
+            meta["transaction_time"] = txn.date_time.isoformat()
         
         postings = []
         needs_fixme = False
@@ -1443,13 +1459,15 @@ class Trading212Source(DescriptionBasedSource):
         
         # Use same metadata key as API transactions for consistent matching
         meta = {
-            "trading212_desc": source_desc,
-            POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            
         }
         
         # Add all available CSV metadata
-        meta["trading212_action"] = csv_txn.action
-        meta["trading212_time"] = csv_txn.time.isoformat()
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        meta["transaction_time"] = csv_txn.time.isoformat()
         if csv_txn.notes:
             meta["notes"] = csv_txn.notes
         if csv_txn.num_shares is not None:
@@ -1513,13 +1531,77 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212-csv>",
                 "lineno": 0,
-                POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+                
             },
             date=date,
             flag="*",
             payee="TRADING 212",
             narration=narration,
-            tags=frozenset({"imported"}),
+            tags=frozenset(),
+            links=frozenset(),
+            postings=postings,
+        )
+
+    def _make_csv_fee_transaction(self, csv_txn: CsvTransaction) -> Transaction:
+        """Create a beancount transaction from a CSV fee entry (ADR Fee, etc.)."""
+        date = csv_txn.time.date()
+        
+        source_desc = f"{csv_txn.action} {csv_txn.total} {csv_txn.currency}"
+        
+        meta = {
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            
+        }
+        
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        meta["transaction_time"] = csv_txn.time.isoformat()
+        if csv_txn.notes:
+            meta["notes"] = csv_txn.notes
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        if csv_txn.isin:
+            meta[ISIN_KEY] = csv_txn.isin
+        if csv_txn.name:
+            meta[INSTRUMENT_NAME_KEY] = csv_txn.name
+        
+        # Fees should come out of cash (negative total) and go to fees expense
+        # The CSV total is typically negative for fees
+        fee_amount = abs(csv_txn.total)
+        
+        postings = [
+            # Cash debited
+            Posting(
+                account=self.cash_account,
+                units=Amount(-fee_amount, csv_txn.currency),
+                cost=None,
+                price=None,
+                flag=None,
+                meta={**meta},
+            ),
+            # Fee expense
+            Posting(
+                account=self.fees_account,
+                units=Amount(fee_amount, csv_txn.currency),
+                cost=None,
+                price=None,
+                flag=None,
+                meta=None,
+            ),
+        ]
+        
+        return Transaction(
+            meta={
+                "filename": "<trading212-csv>",
+                "lineno": 0,
+                
+            },
+            date=date,
+            flag="*",
+            payee="TRADING 212",
+            narration=csv_txn.action,
+            tags=frozenset(),
             links=frozenset(),
             postings=postings,
         )
@@ -1539,13 +1621,15 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{csv_txn.action}: {csv_txn.num_shares} {symbol}"
         
         meta = {
-            "trading212_desc": source_desc,
-            POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            
         }
         
         # Add all available CSV metadata
-        meta["trading212_action"] = csv_txn.action
-        meta["trading212_time"] = csv_txn.time.isoformat()
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        meta["transaction_time"] = csv_txn.time.isoformat()
         if csv_txn.notes:
             meta["notes"] = csv_txn.notes
         
@@ -1588,13 +1672,13 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212-csv>",
                 "lineno": 0,
-                POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+                
             },
             date=date,
             flag="*",
             payee="TRADING 212",
             narration=narration,
-            tags=frozenset({"imported", "corporate-action"}),
+            tags=frozenset(),
             links=frozenset(),
             postings=postings,
         )
@@ -1623,17 +1707,19 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{csv_txn.action}: {csv_txn.num_shares} {symbol} @ {csv_txn.price_per_share}"
         
         meta = {
-            "trading212_desc": source_desc,
-            POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            
         }
         
         # Add CSV metadata
-        meta["trading212_action"] = csv_txn.action
-        meta["trading212_time"] = csv_txn.time.isoformat()
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        meta["transaction_time"] = csv_txn.time.isoformat()
         if csv_txn.notes:
             meta["notes"] = csv_txn.notes
         if csv_txn.result is not None:
-            meta["trading212_realized_pnl"] = str(csv_txn.result)
+            meta["realized_pnl"] = str(csv_txn.result)
         
         # Add pie info if available
         pies = self._get_pies_for_ticker(csv_txn.ticker)
@@ -1670,18 +1756,19 @@ class Trading212Source(DescriptionBasedSource):
             quantity = -abs(csv_txn.num_shares)  # Negative for sale
             cash_amount = abs(csv_txn.total)  # Positive for inflow
             
+            # For sells, put the sale price in CostSpec: {162.38 USD}
             postings.append(Posting(
                 account=symbol_account,
                 units=Amount(quantity, symbol),
                 cost=CostSpec(
-                    number_per=None,  # FIFO/average cost
+                    number_per=csv_txn.price_per_share,
                     number_total=None,
                     currency=csv_txn.price_currency or csv_txn.currency,
                     date=None,
                     label=None,
                     merge=None,
                 ),
-                price=Amount(csv_txn.price_per_share, csv_txn.price_currency or csv_txn.currency),
+                price=None,
                 flag=None,
                 meta={**meta},
             ))
@@ -1745,13 +1832,13 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212-csv>",
                 "lineno": 0,
-                POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+                
             },
             date=date,
             flag="*",
             payee="TRADING 212",
             narration=narration,
-            tags=frozenset({"imported"}),
+            tags=frozenset(),
             links=frozenset(),
             postings=postings,
         )
@@ -1780,13 +1867,15 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"Dividend ({div_type}): {symbol}"
         
         meta = {
-            "trading212_desc": source_desc,
-            POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            
         }
         
         # Add CSV metadata
-        meta["trading212_action"] = csv_txn.action
-        meta["trading212_time"] = csv_txn.time.isoformat()
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        meta["transaction_time"] = csv_txn.time.isoformat()
         meta["dividend_type"] = div_type
         if csv_txn.num_shares:
             meta["quantity"] = str(csv_txn.num_shares)
@@ -1839,13 +1928,13 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212-csv>",
                 "lineno": 0,
-                POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+                
             },
             date=date,
             flag="*",
             payee="TRADING 212",
             narration=narration,
-            tags=frozenset({"imported", "dividend"}),
+            tags=frozenset(),
             links=frozenset(),
             postings=postings,
         )
@@ -1857,12 +1946,14 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"Deposit: {csv_txn.total} {csv_txn.currency}"
         
         meta = {
-            "trading212_desc": source_desc,
-            POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            
         }
         
-        meta["trading212_action"] = csv_txn.action
-        meta["trading212_time"] = csv_txn.time.isoformat()
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        meta["transaction_time"] = csv_txn.time.isoformat()
         if csv_txn.notes:
             meta["notes"] = csv_txn.notes
         
@@ -1900,13 +1991,13 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212-csv>",
                 "lineno": 0,
-                POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+                
             },
             date=date,
             flag="*",
             payee="TRADING 212",
             narration="Deposit",
-            tags=frozenset({"imported"}),
+            tags=frozenset(),
             links=frozenset(),
             postings=postings,
         )
@@ -1918,12 +2009,14 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"Withdrawal: {csv_txn.total} {csv_txn.currency}"
         
         meta = {
-            "trading212_desc": source_desc,
-            POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            
         }
         
-        meta["trading212_action"] = csv_txn.action
-        meta["trading212_time"] = csv_txn.time.isoformat()
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        meta["transaction_time"] = csv_txn.time.isoformat()
         if csv_txn.notes:
             meta["notes"] = csv_txn.notes
         
@@ -1953,13 +2046,84 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212-csv>",
                 "lineno": 0,
-                POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+                
             },
             date=date,
             flag="*",
             payee="TRADING 212",
             narration="Withdrawal",
-            tags=frozenset({"imported"}),
+            tags=frozenset(),
+            links=frozenset(),
+            postings=postings,
+        )
+
+    def _make_csv_corporate_action_removal(self, csv_txn: CsvTransaction) -> Transaction:
+        """Create a transaction for corporate action stock removal (sell @ $0).
+        
+        This handles cases where shares are converted to a new ticker (e.g., HCMC.CNT -> HCWC).
+        The old shares are removed at zero cost with the loss going to Equity:CorporateAction.
+        """
+        from beancount.core.position import CostSpec
+        
+        date = csv_txn.time.date()
+        
+        symbol = self._get_beancount_symbol(csv_txn.ticker, csv_txn.isin)
+        symbol_account = f"{self.investment_account}:{symbol}"
+        
+        source_desc = f"Corp Action Removal: {csv_txn.num_shares} {symbol}"
+        
+        meta = {
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}",
+            SOURCE_BANK_KEY: "Trading212",
+            SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+        }
+        
+        meta[TRANSACTION_TYPE_KEY] = "Corporate Action - Stock Removal"
+        meta["original_action"] = csv_txn.action
+        meta["transaction_time"] = csv_txn.time.isoformat()
+        if csv_txn.notes:
+            meta["notes"] = csv_txn.notes
+        
+        # Remove the shares at zero cost
+        quantity = -abs(csv_txn.num_shares)
+        
+        postings = [
+            Posting(
+                account=symbol_account,
+                units=Amount(quantity, symbol),
+                cost=CostSpec(
+                    number_per=None,  # Take from lot at any cost
+                    number_total=None,
+                    currency=None,
+                    date=None,
+                    label=None,
+                    merge=None,
+                ),
+                price=None,
+                flag=None,
+                meta={**meta},
+            ),
+            # Balance to equity account (the cost basis of these shares is a loss)
+            Posting(
+                account="Equity:CorporateAction",
+                units=None,  # Auto-balance
+                cost=None,
+                price=None,
+                flag=None,
+                meta=None,
+            ),
+        ]
+        
+        return Transaction(
+            meta={
+                "filename": "<trading212-csv>",
+                "lineno": 0,
+            },
+            date=date,
+            flag="*",
+            payee="TRADING 212",
+            narration=f"Corporate Action - {symbol} Removal",
+            tags=frozenset(),
             links=frozenset(),
             postings=postings,
         )
@@ -1976,12 +2140,14 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{csv_txn.action}: {csv_txn.num_shares} {symbol}"
         
         meta = {
-            "trading212_desc": source_desc,
-            POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            
         }
         
-        meta["trading212_action"] = csv_txn.action
-        meta["trading212_time"] = csv_txn.time.isoformat()
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        meta["transaction_time"] = csv_txn.time.isoformat()
         
         from beancount.core.position import CostSpec
         
@@ -2022,13 +2188,13 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212-csv>",
                 "lineno": 0,
-                POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+                
             },
             date=date,
             flag="*",
             payee="TRADING 212",
             narration=narration,
-            tags=frozenset({"imported", "corporate-action", "stock-split"}),
+            tags=frozenset(),
             links=frozenset(),
             postings=postings,
         )
@@ -2040,12 +2206,14 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{csv_txn.action}: {csv_txn.total} {csv_txn.currency}"
         
         meta = {
-            "trading212_desc": source_desc,
-            POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            
         }
         
-        meta["trading212_action"] = csv_txn.action
-        meta["trading212_time"] = csv_txn.time.isoformat()
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        meta["transaction_time"] = csv_txn.time.isoformat()
         if csv_txn.notes:
             meta["notes"] = csv_txn.notes
         
@@ -2072,13 +2240,13 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212-csv>",
                 "lineno": 0,
-                POSTING_META_TRANSACTION_REF_KEY: csv_txn.transaction_id,
+                
             },
             date=date,
             flag="*",
             payee="TRADING 212",
             narration=f"Result Adjustment",
-            tags=frozenset({"imported", "adjustment"}),
+            tags=frozenset(),
             links=frozenset(),
             postings=postings,
         )
@@ -2149,11 +2317,10 @@ class Trading212Source(DescriptionBasedSource):
             meta["note"] = ca.note
         
         # Custom directive format: custom "autobean.stock_split" ratio COMMODITY
-        # Values must be properly typed for beancount printer
-        from beancount.core.amount import Amount as BcAmount
+        # Values must be (value, dtype) tuples for beancount printer
         values = [
-            ratio,  # Decimal - ratio of new shares to old
-            symbol,  # String - commodity symbol
+            (ratio, Decimal),  # Decimal - ratio of new shares to old
+            (symbol, str),  # String - commodity symbol
         ]
         
         return Custom(
@@ -2236,8 +2403,26 @@ class Trading212Source(DescriptionBasedSource):
                 txn = None
                 txn_type = "trading212_csv"
                 
+                # Detect corporate action sell (sell @ $0 with no proceeds - stock conversion)
+                # Note: price can be 0E-10 in CSV, so use < comparison with small tolerance
+                is_corp_action_sell = (
+                    action in order_actions and 
+                    "sell" in action.lower() and
+                    csv_txn.price_per_share is not None and
+                    abs(csv_txn.price_per_share) < D("0.0001") and
+                    abs(csv_txn.total) < D("0.01")
+                )
+                
                 # Route to appropriate handler based on action
-                if action in order_actions:
+                if is_corp_action_sell:
+                    # This is a corporate action - shares removed at zero cost (stock conversion)
+                    txn = self._make_csv_corporate_action_removal(csv_txn)
+                    txn_type = "trading212_corp_action_sell"
+                    symbol = self._get_beancount_symbol(csv_txn.ticker, csv_txn.isin)
+                    symbol_account = f"{self.investment_account}:{symbol}"
+                    account_set.add(symbol_account)
+                    
+                elif action in order_actions:
                     txn = self._make_csv_order_transaction(csv_txn)
                     txn_type = "trading212_order"
                     # Add symbol account
@@ -2280,6 +2465,10 @@ class Trading212Source(DescriptionBasedSource):
                 elif action == "Result adjustment":
                     txn = self._make_csv_adjustment_transaction(csv_txn)
                     txn_type = "trading212_adjustment"
+                    
+                elif action == "ADR Fee":
+                    txn = self._make_csv_fee_transaction(csv_txn)
+                    txn_type = "trading212_fee"
                     
                 else:
                     # Unknown action type - log warning and skip
@@ -2400,6 +2589,42 @@ class Trading212Source(DescriptionBasedSource):
                         },
                     ))
         
+        # =====================================================================
+        # DOCUMENT DIRECTIVES (for CSV source files)
+        # =====================================================================
+        
+        # Generate Document directives for each CSV file
+        csv_files_with_dates = {}  # filename -> max_date
+        for txn in self._csv_transactions or []:
+            if txn.source_file:
+                txn_date = txn.time.date()
+                if txn.source_file not in csv_files_with_dates:
+                    csv_files_with_dates[txn.source_file] = txn_date
+                else:
+                    csv_files_with_dates[txn.source_file] = max(
+                        csv_files_with_dates[txn.source_file], txn_date
+                    )
+        
+        for csv_path, max_date in csv_files_with_dates.items():
+            doc_basename = os.path.basename(csv_path)
+            results.add_pending_entry(ImportResult(
+                date=max_date,
+                entries=[
+                    Document(
+                        meta=None,
+                        date=max_date,
+                        account=self.cash_account,
+                        filename=csv_path,  # Absolute path
+                        tags=EMPTY_SET,
+                        links=EMPTY_SET,
+                    )
+                ],
+                info=dict(
+                    type='text/csv',
+                    filename=doc_basename,
+                ),
+            ))
+        
         # Generate control report to check for discrepancies
         # Report is saved to data_directory
         self._generate_control_report()
@@ -2451,6 +2676,7 @@ class Trading212Source(DescriptionBasedSource):
         csv_stock_splits = [t for t in (self._csv_transactions or []) 
                            if t.action in ("Stock split open", "Stock split close")]
         csv_adjustments = [t for t in (self._csv_transactions or []) if t.action == "Result adjustment"]
+        csv_adr_fees = [t for t in (self._csv_transactions or []) if t.action == "ADR Fee"]
         
         report["summary"] = {
             "data_source": "CSV",
@@ -2477,9 +2703,9 @@ class Trading212Source(DescriptionBasedSource):
             total_buy_cost = sum(abs(t.total) for t in csv_buy_orders)
             total_sell_proceeds = sum(abs(t.total) for t in csv_sell_orders)
             
-            # CSV values are net amounts (after fees), so we don't add separate fees
-            # The fees are already embedded in the transaction totals
-            total_fees = D(0)
+            # ADR fees are separate entries that reduce cash balance
+            # Other fees are already embedded in transaction totals
+            total_fees = sum(abs(t.total) for t in csv_adr_fees)
         else:
             # No CSV data available - this is now an error condition
             print("[Trading212] Warning: No CSV exports found - unable to calculate cash flow", flush=True)
@@ -2583,9 +2809,11 @@ class Trading212Source(DescriptionBasedSource):
             
             return adjusted_shares
         
+        
         if self._csv_transactions:
             # Use CSV data - key by ISIN, apply date-aware splits
-            for t in csv_orders:
+            # Sort by date to ensure buys are processed before sells for position tracking
+            for t in sorted(csv_orders, key=lambda x: x.time):
                 isin = t.isin
                 if not isin:
                     continue
@@ -2597,10 +2825,26 @@ class Trading212Source(DescriptionBasedSource):
                 # Apply splits based on transaction date
                 adjusted_qty = apply_splits_to_shares(isin, qty, t.time.date())
                 
+                # Corporate action sells (price ~ $0, total ~ $0) can be two types:
+                # 1. Delisting: shares were purchased, now worthless - SHOULD subtract
+                # 2. Conversion: shares came from corporate action, no buys - should skip
+                # We detect conversion by checking if subtracting would make position negative
+                is_zero_price_sell = (
+                    "sell" in t.action.lower() and
+                    t.price_per_share is not None and
+                    abs(t.price_per_share) < D("0.0001") and
+                    abs(t.total) < D("0.01")
+                )
+                
+                # Only skip if this would result in negative position (conversion case)
+                current_position = expected_positions.get(isin, D(0))
+                is_conversion_sell = is_zero_price_sell and (current_position - adjusted_qty < 0)
+                
                 if "buy" in t.action.lower():
                     expected_positions[isin] += adjusted_qty
-                elif "sell" in t.action.lower():
+                elif "sell" in t.action.lower() and not is_conversion_sell:
                     expected_positions[isin] -= adjusted_qty
+                # Conversion sells are skipped - shares came from corporate action, not purchases
             
             # Account for stock distributions and splits from CSV
             for t in csv_stock_distributions:
