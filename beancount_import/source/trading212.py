@@ -1506,6 +1506,9 @@ class Trading212Source(DescriptionBasedSource):
             income_account = "Income:Other"
             narration = csv_txn.action
         
+        # Clearing metadata for all postings
+        clearing_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         postings = [
             # Cash received
             Posting(
@@ -1523,7 +1526,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={**clearing_meta},
             ),
         ]
         
@@ -1570,6 +1573,9 @@ class Trading212Source(DescriptionBasedSource):
         # The CSV total is typically negative for fees
         fee_amount = abs(csv_txn.total)
         
+        # Clearing metadata for all postings  
+        clearing_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         postings = [
             # Cash debited
             Posting(
@@ -1587,7 +1593,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={**clearing_meta},
             ),
         ]
         
@@ -1636,6 +1642,9 @@ class Trading212Source(DescriptionBasedSource):
         # Import CostSpec for zero-cost shares
         from beancount.core.position import CostSpec
         
+        # Clearing metadata for all postings
+        clearing_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         # Stock distribution: receive shares at zero cost
         postings = [
             # Shares received
@@ -1661,7 +1670,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={**clearing_meta},
             ),
         ]
         
@@ -1737,7 +1746,7 @@ class Trading212Source(DescriptionBasedSource):
                 number_per=csv_txn.price_per_share,
                 number_total=None,
                 currency=csv_txn.price_currency or csv_txn.currency,
-                date=None,
+                date=date,  # Include date for unique lot identification
                 label=None,
                 merge=None,
             )
@@ -1756,15 +1765,15 @@ class Trading212Source(DescriptionBasedSource):
             quantity = -abs(csv_txn.num_shares)  # Negative for sale
             cash_amount = abs(csv_txn.total)  # Positive for inflow
             
-            # For sells, put the sale price in CostSpec: {162.38 USD}
+            # For sells, use empty CostSpec {} to let FIFO matching work
             postings.append(Posting(
                 account=symbol_account,
                 units=Amount(quantity, symbol),
                 cost=CostSpec(
-                    number_per=csv_txn.price_per_share,
+                    number_per=None,  # No price - FIFO will match
                     number_total=None,
-                    currency=csv_txn.price_currency or csv_txn.currency,
-                    date=None,
+                    currency=None,
+                    date=None,  # No date - FIFO will match
                     label=None,
                     merge=None,
                 ),
@@ -1773,6 +1782,9 @@ class Trading212Source(DescriptionBasedSource):
                 meta={**meta},
             ))
         
+        # Base metadata for other postings (just source_ref for clearing)
+        clearing_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         # Cash posting
         postings.append(Posting(
             account=self.cash_account,
@@ -1780,7 +1792,7 @@ class Trading212Source(DescriptionBasedSource):
             cost=None,
             price=None,
             flag=None,
-            meta=None,
+            meta={**clearing_meta},
         ))
         
         # P&L posting for sales
@@ -1791,7 +1803,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={**clearing_meta},
             ))
         
         # Fee postings
@@ -1802,7 +1814,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta={"fee_type": "stamp_duty"},
+                meta={"fee_type": "stamp_duty", **clearing_meta},
             ))
         
         if csv_txn.transaction_fee and csv_txn.transaction_fee != D("0"):
@@ -1812,7 +1824,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta={"fee_type": "transaction_fee"},
+                meta={"fee_type": "transaction_fee", **clearing_meta},
             ))
         
         if csv_txn.finra_fee and csv_txn.finra_fee != D("0"):
@@ -1822,7 +1834,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta={"fee_type": "finra_fee"},
+                meta={"fee_type": "finra_fee", **clearing_meta},
             ))
         
         side = "Buy" if is_buy else "Sell"
@@ -1901,6 +1913,9 @@ class Trading212Source(DescriptionBasedSource):
             meta={**meta},
         ))
         
+        # Clearing metadata
+        clearing_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         # Withholding tax if any
         if csv_txn.withholding_tax and csv_txn.withholding_tax != 0:
             postings.append(Posting(
@@ -1909,7 +1924,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta={"tax_type": "withholding_tax"},
+                meta={"tax_type": "withholding_tax", **clearing_meta},
             ))
         
         # Income source
@@ -1919,7 +1934,7 @@ class Trading212Source(DescriptionBasedSource):
             cost=None,
             price=None,
             flag=None,
-            meta=None,
+            meta={**clearing_meta},
         ))
         
         narration = f"Dividend ({div_type}) - {symbol}"
@@ -1957,6 +1972,9 @@ class Trading212Source(DescriptionBasedSource):
         if csv_txn.notes:
             meta["notes"] = csv_txn.notes
         
+        # Clearing metadata
+        clearing_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         postings = [
             Posting(
                 account=self.cash_account,
@@ -1972,7 +1990,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={**clearing_meta},
             ),
         ]
         
@@ -1984,7 +2002,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta={"fee_type": "deposit_fee"},
+                meta={"fee_type": "deposit_fee", **clearing_meta},
             ))
         
         return Transaction(
@@ -2023,6 +2041,9 @@ class Trading212Source(DescriptionBasedSource):
         # Total should be negative for withdrawal
         amount = -abs(csv_txn.total) if csv_txn.total > 0 else csv_txn.total
         
+        # Clearing metadata
+        clearing_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         postings = [
             Posting(
                 account=self.cash_account,
@@ -2038,7 +2059,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={**clearing_meta},
             ),
         ]
         
@@ -2087,6 +2108,9 @@ class Trading212Source(DescriptionBasedSource):
         # Remove the shares at zero cost
         quantity = -abs(csv_txn.num_shares)
         
+        # Clearing metadata
+        clearing_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         postings = [
             Posting(
                 account=symbol_account,
@@ -2110,7 +2134,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={**clearing_meta},
             ),
         ]
         
@@ -2155,6 +2179,9 @@ class Trading212Source(DescriptionBasedSource):
         # Open = remove old shares, Close = add new shares
         quantity = csv_txn.num_shares if is_open else -abs(csv_txn.num_shares)
         
+        # Clearing metadata
+        clearing_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         postings = [
             Posting(
                 account=symbol_account,
@@ -2178,7 +2205,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={**clearing_meta},
             ),
         ]
         
@@ -2217,6 +2244,9 @@ class Trading212Source(DescriptionBasedSource):
         if csv_txn.notes:
             meta["notes"] = csv_txn.notes
         
+        # Clearing metadata
+        clearing_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         postings = [
             Posting(
                 account=self.cash_account,
@@ -2232,7 +2262,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={**clearing_meta},
             ),
         ]
         
