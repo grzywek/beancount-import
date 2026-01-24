@@ -365,14 +365,29 @@ def get_entry_file_selector_argparser(kwargs):
 
 def stage_missing_accounts(stage, entry_file_selector, account_map=None):
     """Stages Open directives for any missing accounts referenced in new entries."""
+    # Common fiat currencies that should NOT use FIFO booking
+    FIAT_CURRENCIES = {
+        'USD', 'EUR', 'PLN', 'GBP', 'CHF', 'JPY', 'CAD', 'AUD', 'NZD', 'SEK', 
+        'NOK', 'DKK', 'CZK', 'HUF', 'RON', 'BGN', 'HRK', 'RUB', 'TRY', 'CNY',
+        'HKD', 'SGD', 'INR', 'MXN', 'BRL', 'ZAR', 'KRW', 'TWD', 'THB', 'IDR',
+        'MYR', 'PHP', 'ILS',
+    }
+    
     for account, date, currencies in stage.get_missing_accounts(
             account_map=account_map):
+        # Use FIFO booking for stock accounts (single non-fiat currency)
+        booking = None
+        if len(currencies) == 1:
+            currency = next(iter(currencies))
+            if currency.upper() not in FIAT_CURRENCIES:
+                booking = "FIFO"
+        
         open_entry = Open(
             date=date,
             account=account,
             currencies=sorted(list(currencies)),
             meta=None,
-            booking=None)
+            booking=booking)
         stage.add_entry(open_entry, entry_file_selector(open_entry))
 
 

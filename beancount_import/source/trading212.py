@@ -65,7 +65,7 @@ from typing import (
 
 
 from beancount.core.amount import Amount
-from beancount.core.data import Balance, Commodity, Custom, Directive, Document, Posting, Transaction, TxnPosting, EMPTY_SET
+from beancount.core.data import Balance, Commodity, Custom, Directive, Document, Open, Posting, Transaction, TxnPosting, EMPTY_SET
 from beancount.core.number import D
 
 from beancount_import.journal_editor import JournalEditor
@@ -2364,17 +2364,20 @@ class Trading212Source(DescriptionBasedSource):
                 if posting.meta is None:
                     continue
                 
+                # Primary matching using source_ref key (format: "trading212:ID")
+                source_ref = posting.meta.get(SOURCE_REF_KEY)
+                if source_ref and source_ref.startswith("trading212:"):
+                    txn_id = source_ref[len("trading212:"):]
+                    matched_transaction_refs.setdefault(txn_id, []).append((entry, posting))
+                
+                # Legacy matching for backward compatibility
                 order_id = posting.meta.get(POSTING_META_ORDER_ID_KEY)
-                if order_id:
+                if order_id and order_id != source_ref:  # Avoid duplicate if same as source_ref
                     matched_order_ids.setdefault(order_id, []).append((entry, posting))
                 
                 div_ref = posting.meta.get(POSTING_META_DIVIDEND_REF_KEY)
                 if div_ref:
                     matched_dividend_refs.setdefault(div_ref, []).append((entry, posting))
-                
-                txn_ref = posting.meta.get(POSTING_META_TRANSACTION_REF_KEY)
-                if txn_ref:
-                    matched_transaction_refs.setdefault(txn_ref, []).append((entry, posting))
         
         # =====================================================================
         # CSV-FIRST PROCESSING
