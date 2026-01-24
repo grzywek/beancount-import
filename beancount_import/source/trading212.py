@@ -2330,6 +2330,24 @@ class Trading212Source(DescriptionBasedSource):
             values=values,
         )
 
+    def is_posting_cleared(self, posting: Posting) -> bool:
+        """Check if a posting is cleared.
+
+        A posting is cleared if it has the source_ref metadata with trading212: prefix.
+
+        Args:
+            posting: The posting to check.
+
+        Returns:
+            True if the posting is cleared.
+        """
+        if posting.meta is None:
+            return False
+        source_ref = posting.meta.get(SOURCE_REF_KEY)
+        if source_ref and source_ref.startswith("trading212:"):
+            return True
+        return False
+
     def get_example_key_value_pairs(
         self, transaction: Transaction, posting: Posting
     ) -> Dict[str, Union[str, Sequence[str]]]:
