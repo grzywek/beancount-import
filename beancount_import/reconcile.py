@@ -10,7 +10,7 @@ import string
 import random
 import pickle
 
-from beancount.core.data import Transaction, Posting, Balance, Open, Close, Price, Commodity, Document, Custom, Directive, Entries, Amount
+from beancount.core.data import Transaction, Posting, Balance, Open, Close, Price, Commodity, Document, Custom, Directive, Entries, Amount, Booking
 from beancount.core.flags import FLAG_PADDING
 from beancount.core.number import MISSING, Decimal, ZERO
 import beancount.parser.printer
@@ -380,7 +380,7 @@ def stage_missing_accounts(stage, entry_file_selector, account_map=None):
         if len(currencies) == 1:
             currency = next(iter(currencies))
             if currency.upper() not in FIAT_CURRENCIES:
-                booking = "FIFO"
+                booking = Booking.FIFO
         
         open_entry = Open(
             date=date,
