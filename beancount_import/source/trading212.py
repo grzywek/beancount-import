@@ -1736,11 +1736,13 @@ class Trading212Source(DescriptionBasedSource):
             quantity = csv_txn.num_shares
             cash_amount = -abs(csv_txn.total)  # Negative for outflow
             
-            # Use total cost in account currency (csv_txn.currency) to ensure transactions balance.
+            # Calculate per-share cost in account currency to ensure transactions balance.
             # This handles both rounding issues and cross-currency transactions (e.g., GBX stock with USD cash).
+            # total / num_shares gives exact per-share cost that will balance with cash.
+            cost_per_share = abs(csv_txn.total) / csv_txn.num_shares
             cost_spec = CostSpec(
-                number_per=None,
-                number_total=abs(csv_txn.total),  # Total cost in account currency
+                number_per=cost_per_share,  # Per-share cost in account currency
+                number_total=None,
                 currency=csv_txn.currency,  # Always use account/cash currency (e.g., USD)
                 date=date,  # Include date for unique lot identification
                 label=None,
