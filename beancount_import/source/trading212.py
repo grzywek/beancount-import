@@ -65,7 +65,7 @@ from typing import (
 
 
 from beancount.core.amount import Amount
-from beancount.core.data import Balance, Commodity, Custom, Directive, Document, Open, Posting, Transaction, TxnPosting, EMPTY_SET
+from beancount.core.data import Balance, Commodity, Custom, Directive, Document, Open, Posting, Price, Transaction, TxnPosting, EMPTY_SET
 from beancount.core.number import D
 
 from beancount_import.journal_editor import JournalEditor
@@ -520,7 +520,7 @@ class Trading212Source(DescriptionBasedSource):
         # Data loaded from files (orders, dividends, transactions are now from CSV only)
         self._pending_orders: Optional[List[ApiOrder]] = None  # Active/pending orders (forecast)
         self._positions: Optional[List[ApiPosition]] = None
-        self._positions_fetched_at: Optional[datetime.date] = None  # Date when positions were fetched
+        self._positions_fetched_at: Optional[datetime.datetime] = None  # Datetime when positions were fetched
         self._account_summary: Optional[ApiAccountSummary] = None
         self._account_summary_fetched_at: Optional[datetime.date] = None  # Date when account summary was fetched
         self._ticker_to_pie: Optional[Dict[str, List[str]]] = None  # Ticker to pie names mapping
@@ -587,7 +587,7 @@ class Trading212Source(DescriptionBasedSource):
                 # Parse fetched_at date
                 if "fetched_at" in data:
                     fetched_at = datetime.datetime.fromisoformat(data["fetched_at"])
-                    self._positions_fetched_at = fetched_at.date()
+                    self._positions_fetched_at = fetched_at  # Store full datetime for hour-based price date logic
                 print(f"[Trading212] ✓ {len(self._positions)} positions loaded", flush=True)
             else:
                 print("[Trading212] ✗ positions.json not found or empty", flush=True)
@@ -2579,7 +2579,7 @@ class Trading212Source(DescriptionBasedSource):
                 ))
         
         # Generate balance assertions for current positions (use fetched_at date from JSON)
-        positions_date = self._positions_fetched_at or datetime.date.today()
+        positions_date = (self._positions_fetched_at.date() if self._positions_fetched_at else datetime.date.today())
         
         for position in self._positions:
             symbol_account = self._get_symbol_account(position.ticker, position.isin)
@@ -2594,6 +2594,32 @@ class Trading212Source(DescriptionBasedSource):
                     "ticker": position.ticker,
                 },
             ))
+        
+        # Generate Price directives from current_price in positions
+        # If fetched between 00:00-05:00, use previous day (market was closed)
+        price_date = positions_date
+        if self._positions_fetched_at:
+            hour = self._positions_fetched_at.hour
+            if 0 <= hour < 5:
+                price_date = positions_date - datetime.timedelta(days=1)
+        
+        for position in self._positions:
+            if position.current_price and position.current_price > 0:
+                symbol = self._get_beancount_symbol(position.ticker, position.isin)
+                price_directive = Price(
+                    meta={"filename": "<trading212-positions>", "lineno": 0},
+                    date=price_date,
+                    currency=symbol,
+                    amount=Amount(position.current_price, position.currency),
+                )
+                results.add_pending_entry(ImportResult(
+                    date=price_date,
+                    entries=[price_directive],
+                    info={
+                        "type": "trading212_price",
+                        "ticker": position.ticker,
+                    },
+                ))
         
         # Generate cash balance assertion (use fetched_at date from account_summary)
         if self._account_summary:
