@@ -1729,6 +1729,14 @@ class Trading212Source(DescriptionBasedSource):
         if pies:
             meta["pie"] = ", ".join(pies)
         
+        # Add original price data for reference (especially useful for cross-currency transactions)
+        if csv_txn.price_per_share:
+            meta["price_per_share"] = str(csv_txn.price_per_share)
+        if csv_txn.price_currency:
+            meta["price_currency"] = csv_txn.price_currency
+        if csv_txn.exchange_rate and csv_txn.exchange_rate != D("1"):
+            meta["exchange_rate"] = str(csv_txn.exchange_rate)
+        
         postings = []
         
         if is_buy:
@@ -1738,10 +1746,19 @@ class Trading212Source(DescriptionBasedSource):
             
             # Calculate per-share cost in account currency to ensure transactions balance.
             # This handles both rounding issues and cross-currency transactions (e.g., GBX stock with USD cash).
-            # total / num_shares gives exact per-share cost that will balance with cash.
-            cost_per_share = abs(csv_txn.total) / csv_txn.num_shares
+            # CSV total includes fees, so subtract them to get the actual stock cost.
+            total_fees = D("0")
+            if csv_txn.stamp_duty:
+                total_fees += abs(csv_txn.stamp_duty)
+            if csv_txn.transaction_fee:
+                total_fees += abs(csv_txn.transaction_fee)
+            if csv_txn.finra_fee:
+                total_fees += abs(csv_txn.finra_fee)
+            
+            stock_cost = abs(csv_txn.total) - total_fees
+            cost_per_share = stock_cost / csv_txn.num_shares
             cost_spec = CostSpec(
-                number_per=cost_per_share,  # Per-share cost in account currency
+                number_per=cost_per_share,  # Per-share cost in account currency (excluding fees)
                 number_total=None,
                 currency=csv_txn.currency,  # Always use account/cash currency (e.g., USD)
                 date=date,  # Include date for unique lot identification
