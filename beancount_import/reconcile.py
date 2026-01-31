@@ -642,31 +642,6 @@ class LoadedReconciler(object):
         self.uncleared_postings = []  # type: List[Tuple[Transaction, Posting]]
         self._get_uncleared_postings()
 
-        # Check for missing Open directives for accounts in existing entries
-        missing_accounts_from_journal = self._get_missing_accounts_from_journal()
-        if missing_accounts_from_journal:
-            # Group by account, get earliest date
-            account_dates = {}  # type: Dict[str, datetime.date]
-            for account, date in missing_accounts_from_journal:
-                if account not in account_dates or date < account_dates[account]:
-                    account_dates[account] = date
-            
-            # Create Open directive entries for missing accounts
-            for account, date in sorted(account_dates.items()):
-                open_entry = Open(
-                    date=date,
-                    account=account,
-                    currencies=[],
-                    meta=None,
-                    booking=None)
-                import_results.append(
-                    make_pending_entry(
-                        ImportResult(
-                            date=date, 
-                            entries=(open_entry,), 
-                            info={'type': 'missing_account'}),
-                        None))
-
         self.pending_data = import_results
         self.reconciler.log_status('Done loading')
 
@@ -703,22 +678,6 @@ class LoadedReconciler(object):
                 if d < cleared_before or d > cleared_after:
                     continue
                 uncleared.append((entry, posting))
-
-    def _get_missing_accounts_from_journal(self) -> List[Tuple[str, datetime.date]]:
-        """Scan journal for accounts referenced but without Open directives."""
-        missing = []  # type: List[Tuple[str, datetime.date]]
-        existing_accounts = set(self.editor.accounts.keys())
-        
-        for entry in self.editor.entries:
-            if isinstance(entry, Transaction):
-                for posting in entry.postings:
-                    if posting.account and posting.account not in existing_accounts:
-                        missing.append((posting.account, entry.date))
-            elif isinstance(entry, Balance):
-                if entry.account and entry.account not in existing_accounts:
-                    missing.append((entry.account, entry.date))
-        
-        return missing
 
     def _get_uncleared_postings(self):
         cleared_dates = dict(
@@ -974,7 +933,7 @@ class LoadedReconciler(object):
                 sources=self.sources,
             )
         else:
-            assert next_pending.source is not None
+            # Handle both source-based entries and missing account Open directives
             stage = self._get_generic_stage(next_pending.entries)
             result = Candidates(
                 candidates=[
