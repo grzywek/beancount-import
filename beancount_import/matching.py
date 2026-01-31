@@ -520,7 +520,8 @@ IGNORED_META_KEYS_FOR_MATCHING = frozenset([
     'lineno',
     'filename',
     # Bank/source identification - will always differ between sources
-    'source_bank',
+    'source',
+    'source_bank',  # Legacy, kept for backward compatibility
     'source_ref',
     'document',
     'account_iban',

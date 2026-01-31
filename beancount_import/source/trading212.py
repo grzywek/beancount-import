@@ -81,13 +81,16 @@ from beancount_import.unbook import group_postings_by_meta, unbook_postings
 
 
 # Metadata keys (standardized across all bank sources)
-SOURCE_REF_KEY = 'source_ref'  # Unique transaction reference (format: "trading212:TXID")
-SOURCE_BANK_KEY = 'source_bank'  # Bank name for this source
+SOURCE_KEY = 'source'  # Source/provider identifier (e.g., "trading212")
+SOURCE_REF_KEY = 'source_ref'  # Raw transaction reference ID from export
 TRANSACTION_TYPE_KEY = 'transaction_type'  # Transaction type
 TICKER_KEY = 'ticker'  # Stock ticker
 ISIN_KEY = 'isin'  # ISIN code
 INSTRUMENT_NAME_KEY = 'instrument_name'  # Instrument name
 SOURCE_DOC_KEY = 'document'  # Link to source document file
+
+# Source identifier for this importer
+SOURCE_ID = 'trading212'
 
 # Legacy keys for backward compatibility (matching old transactions)
 POSTING_META_ORDER_ID_KEY = SOURCE_REF_KEY
@@ -1029,11 +1032,11 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{order.side} {symbol} {order.filled_quantity} @ {order.filled_price}"
         
         # Minimal meta for all postings on Trading212 accounts (for clearing)
-        source_ref_meta = {SOURCE_REF_KEY: f"trading212:{order.order_id}"}
+        source_ref_meta = {SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{order.order_id}"}
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{order.order_id}",
-            SOURCE_BANK_KEY: "Trading212",
+            SOURCE_REF_KEY: f"{order.order_id}",
+            SOURCE_KEY: SOURCE_ID,
             POSTING_META_ORDER_ID_KEY: str(order.order_id),
         }
         
@@ -1175,7 +1178,7 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"PENDING {order.side} {symbol} {quantity} @ {price or '?'}"
         
         # Simplified metadata for pending orders
-        source_ref_meta = {SOURCE_REF_KEY: str(order.order_id)}
+        source_ref_meta = {SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: str(order.order_id)}
         meta = {
             SOURCE_REF_KEY: str(order.order_id),
             "order_status": order.status,
@@ -1274,8 +1277,8 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"Dividend {symbol} {dividend.amount} {dividend.currency}"
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{dividend.reference}",
-            SOURCE_BANK_KEY: "Trading212",
+            SOURCE_REF_KEY: f"{dividend.reference}",
+            SOURCE_KEY: SOURCE_ID,
             POSTING_META_DIVIDEND_REF_KEY: dividend.reference,
         }
         
@@ -1339,7 +1342,7 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{txn.transaction_type} {txn.amount} {txn.currency}"
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             POSTING_META_TRANSACTION_REF_KEY: txn.reference,
         }
         
@@ -1463,7 +1466,7 @@ class Trading212Source(DescriptionBasedSource):
         
         # Use same metadata key as API transactions for consistent matching
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
         }
         
@@ -1554,7 +1557,7 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{csv_txn.action} {csv_txn.total} {csv_txn.currency}"
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
         }
         
@@ -1627,7 +1630,7 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{csv_txn.action}: {csv_txn.num_shares} {symbol}"
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
         }
         
@@ -1714,10 +1717,10 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{csv_txn.action}: {csv_txn.num_shares} {symbol} @ {csv_txn.price_per_share}"
         
         # Minimal meta for all postings on Trading212 accounts (for clearing)
-        source_ref_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        source_ref_meta = {SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{csv_txn.transaction_id}"}
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
         }
         
@@ -1899,10 +1902,10 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"Dividend ({div_type}): {symbol}"
         
         # Minimal meta for all postings on Trading212 accounts (for clearing)
-        source_ref_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        source_ref_meta = {SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{csv_txn.transaction_id}"}
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
         }
         
@@ -1983,10 +1986,10 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"Deposit: {csv_txn.total} {csv_txn.currency}"
         
         # Minimal meta for all postings on Trading212 accounts (for clearing)
-        source_ref_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        source_ref_meta = {SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{csv_txn.transaction_id}"}
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
         }
         
@@ -2051,7 +2054,7 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"Withdrawal: {csv_txn.total} {csv_txn.currency}"
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
         }
         
@@ -2117,8 +2120,8 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"Corp Action Removal: {csv_txn.num_shares} {symbol}"
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}",
-            SOURCE_BANK_KEY: "Trading212",
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}",
+            SOURCE_KEY: SOURCE_ID,
             SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
         }
         
@@ -2186,7 +2189,7 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{csv_txn.action}: {csv_txn.num_shares} {symbol}"
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
         }
         
@@ -2254,10 +2257,10 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{csv_txn.action}: {csv_txn.total} {csv_txn.currency}"
         
         # Minimal meta for all postings on Trading212 accounts (for clearing)
-        source_ref_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        source_ref_meta = {SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{csv_txn.transaction_id}"}
         
         meta = {
-            SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
         }
         
@@ -2386,7 +2389,7 @@ class Trading212Source(DescriptionBasedSource):
     def is_posting_cleared(self, posting: Posting) -> bool:
         """Check if a posting is cleared.
 
-        A posting is cleared if it has the source_ref metadata with trading212: prefix.
+        A posting is cleared if it has source="trading212" and a source_ref.
 
         Args:
             posting: The posting to check.
@@ -2396,8 +2399,9 @@ class Trading212Source(DescriptionBasedSource):
         """
         if posting.meta is None:
             return False
+        source = posting.meta.get(SOURCE_KEY)
         source_ref = posting.meta.get(SOURCE_REF_KEY)
-        if source_ref and source_ref.startswith("trading212:"):
+        if source == SOURCE_ID and source_ref:
             return True
         return False
 
