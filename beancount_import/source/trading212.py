@@ -1369,7 +1369,7 @@ class Trading212Source(DescriptionBasedSource):
         if txn.transaction_type == "DEPOSIT":
             postings = [
                 Posting(
-                    account=self.cash_trade_account,
+                    account=self.cash_vault_account,
                     units=Amount(txn.amount, txn.currency),
                     cost=None,
                     price=None,
@@ -1388,14 +1388,24 @@ class Trading212Source(DescriptionBasedSource):
             narration = "Deposit"
             
         elif txn.transaction_type == "WITHDRAW":
+            # Import CostSpec for FIFO matching
+            from beancount.core.position import CostSpec
             postings = [
                 Posting(
-                    account=self.cash_trade_account,
+                    account=self.cash_vault_account,
                     units=Amount(-abs(txn.amount), txn.currency),
-                    cost=None,
+                    cost=CostSpec(currency="PLN", number_per=None, number_total=None, date=None, label=None, merge=None),
                     price=None,
                     flag=None,
                     meta={**meta},
+                ),
+                Posting(
+                    account=self.fx_income_account,
+                    units=None,
+                    cost=None,
+                    price=None,
+                    flag=None,
+                    meta=None,
                 ),
                 Posting(
                     account=self.transfer_account,
