@@ -776,20 +776,9 @@ export class CandidatesComponent extends React.PureComponent<
   private handleConfirm = () => {
     this.acceptCandidate(this.state.selectedCandidateIndex);
   };
-  private handleConfirmAll = async () => {
-    // Keep confirming first candidate until no more pending entries
-    const confirmNext = async (): Promise<void> => {
-      if (this.props.candidates.candidates.length === 0) {
-        return;
-      }
-      await this.acceptCandidate(0);
-      // Small delay to allow state update, then check again
-      await new Promise(resolve => setTimeout(resolve, 100));
-      // Re-check if there are still candidates
-      if (this.props.candidates.candidates.length > 0) {
-        return confirmNext();
-      }
-    };
-    await confirmNext();
+  private handleConfirmAll = () => {
+    executeServerCommand("accept_all", null).then((result: { count: number }) => {
+      console.log(`Confirmed ${result.count} entries`);
+    });
   };
 }

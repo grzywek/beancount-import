@@ -286,6 +286,13 @@ class RetrainHandler(tornado.web.RequestHandler):
         self.write(json.dumps(None).encode())
 
 
+class AcceptAllHandler(tornado.web.RequestHandler):
+    def post(self):
+        count = self.application.handle_accept_all()
+        self.set_header('Content-Type', 'application/json')
+        self.write(json.dumps({'count': count}).encode())
+
+
 class WebSocketHandler(tornado.websocket.WebSocketHandler):
     def open(self, *args):
         self.application.socket_clients.add(self)
@@ -458,6 +465,7 @@ class Application(tornado.web.Application):
             (r'/%s/select_candidate' % secret_key, SelectCandidateHandler),
             (r'/%s/skip' % secret_key, SkipHandler),
             (r'/%s/retrain' % secret_key, RetrainHandler),
+            (r'/%s/accept_all' % secret_key, AcceptAllHandler),
         ], **kwargs)
         self.socket_clients = set()
         self.watched_files = dict()
@@ -777,6 +785,37 @@ class Application(tornado.web.Application):
     def handle_retrain(self, _):
         self.retrain()
 
+    def handle_accept_all(self):
+        """Accept all pending entries with their first candidate."""
+        count = 0
+        try:
+            while True:
+                # Get next candidates
+                loaded_reconciler = self.reconciler.loaded_future.result()
+                candidates, index, skip_ids = loaded_reconciler.get_next_candidates(None)
+                
+                if candidates is None or len(candidates.candidates) == 0:
+                    break
+                
+                # Accept first candidate
+                candidate = candidates.candidates[0]
+                result = loaded_reconciler.accept_candidate(candidate, ignore=False)
+                self._notify_modified_files(result.modified_filenames)
+                count += 1
+                
+                # Update state periodically to prevent timeout
+                if count % 100 == 0:
+                    print(f'Accepted {count} entries...')
+                    
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f'Error after accepting {count} entries: {e}')
+        
+        # After accepting all, refresh state
+        self.get_next_candidates(new_pending=True)
+        print(f'Finished accepting {count} entries')
+        return count
 
 def parse_arguments(argv, **kwargs):
     argparser = argparse.ArgumentParser(
