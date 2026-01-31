@@ -1028,6 +1028,9 @@ class Trading212Source(DescriptionBasedSource):
         
         source_desc = f"{order.side} {symbol} {order.filled_quantity} @ {order.filled_price}"
         
+        # Minimal meta for all postings on Trading212 accounts (for clearing)
+        source_ref_meta = {SOURCE_REF_KEY: f"trading212:{order.order_id}"}
+        
         meta = {
             SOURCE_REF_KEY: f"trading212:{order.order_id}",
             SOURCE_BANK_KEY: "Trading212",
@@ -1096,7 +1099,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta=source_ref_meta.copy(),
             ))
             
         elif order.side == "SELL":
@@ -1123,7 +1126,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta=source_ref_meta.copy(),
             ))
             
             # Capital gains posting (if we have realized P&L)
@@ -1134,7 +1137,7 @@ class Trading212Source(DescriptionBasedSource):
                     cost=None,
                     price=None,
                     flag=None,
-                    meta=None,
+                    meta=source_ref_meta.copy(),
                 ))
         
         narration = f"{order.side.capitalize()} {symbol}"
@@ -1172,6 +1175,7 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"PENDING {order.side} {symbol} {quantity} @ {price or '?'}"
         
         # Simplified metadata for pending orders
+        source_ref_meta = {SOURCE_REF_KEY: str(order.order_id)}
         meta = {
             SOURCE_REF_KEY: str(order.order_id),
             "order_status": order.status,
@@ -1217,7 +1221,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta=source_ref_meta.copy(),
             ))
             
         elif order.side == "SELL":
@@ -1242,7 +1246,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta=source_ref_meta.copy(),
             ))
         
         narration = f"[PENDING] {order.side.capitalize()} {symbol}"
@@ -1709,6 +1713,9 @@ class Trading212Source(DescriptionBasedSource):
         
         source_desc = f"{csv_txn.action}: {csv_txn.num_shares} {symbol} @ {csv_txn.price_per_share}"
         
+        # Minimal meta for all postings on Trading212 accounts (for clearing)
+        source_ref_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         meta = {
             SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
@@ -1805,7 +1812,7 @@ class Trading212Source(DescriptionBasedSource):
             cost=None,
             price=None,
             flag=None,
-            meta=None,
+            meta=source_ref_meta.copy(),
         ))
         
         # P&L posting for sales
@@ -1816,7 +1823,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta=source_ref_meta.copy(),
             ))
         
         # Fee postings
@@ -1827,7 +1834,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta={"fee_type": "stamp_duty"},
+                meta={**source_ref_meta, "fee_type": "stamp_duty"},
             ))
         
         if csv_txn.transaction_fee and csv_txn.transaction_fee != D("0"):
@@ -1837,7 +1844,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta={"fee_type": "transaction_fee"},
+                meta={**source_ref_meta, "fee_type": "transaction_fee"},
             ))
         
         if csv_txn.finra_fee and csv_txn.finra_fee != D("0"):
@@ -1847,7 +1854,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta={"fee_type": "finra_fee"},
+                meta={**source_ref_meta, "fee_type": "finra_fee"},
             ))
         
         side = "Buy" if is_buy else "Sell"
@@ -1890,6 +1897,9 @@ class Trading212Source(DescriptionBasedSource):
             div_type = csv_txn.action.split("(")[1].rstrip(")")
         
         source_desc = f"Dividend ({div_type}): {symbol}"
+        
+        # Minimal meta for all postings on Trading212 accounts (for clearing)
+        source_ref_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
         
         meta = {
             SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
@@ -1936,7 +1946,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta={"tax_type": "withholding_tax"},
+                meta={**source_ref_meta, "tax_type": "withholding_tax"},
             ))
         
         # Income source
@@ -1971,6 +1981,9 @@ class Trading212Source(DescriptionBasedSource):
         date = csv_txn.time.date()
         
         source_desc = f"Deposit: {csv_txn.total} {csv_txn.currency}"
+        
+        # Minimal meta for all postings on Trading212 accounts (for clearing)
+        source_ref_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
         
         meta = {
             SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
@@ -2013,7 +2026,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta={"fee_type": "deposit_fee"},
+                meta={**source_ref_meta, "fee_type": "deposit_fee"},
             ))
         
         return Transaction(
@@ -2240,6 +2253,9 @@ class Trading212Source(DescriptionBasedSource):
         
         source_desc = f"{csv_txn.action}: {csv_txn.total} {csv_txn.currency}"
         
+        # Minimal meta for all postings on Trading212 accounts (for clearing)
+        source_ref_meta = {SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}"}
+        
         meta = {
             SOURCE_REF_KEY: f"trading212:{csv_txn.transaction_id}", SOURCE_BANK_KEY: "Trading212", SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             
@@ -2269,7 +2285,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta=source_ref_meta.copy(),
             ),
         ]
         
