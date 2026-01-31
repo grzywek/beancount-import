@@ -339,14 +339,14 @@ def _ticker_to_symbol(ticker: str, currency: Optional[str] = None, account_curre
         isin: Optional ISIN to help determine exchange
     
     Returns:
-        Symbol suitable for beancount (e.g., "AAPL", "WTAI.LSE")
+        Symbol suitable for beancount (e.g., "AAPL", "WTAI-LSE")
     """
     base_symbol = _ticker_to_base_symbol(ticker)
     
     if include_exchange:
         _, exchange_code, _ = _get_exchange_from_ticker(ticker, isin)
         if exchange_code:
-            return f"{base_symbol}.{exchange_code}"
+            return f"{base_symbol}-{exchange_code}"
     
     return base_symbol
 
@@ -780,7 +780,7 @@ class Trading212Source(DescriptionBasedSource):
             if len(symbol) < 2:
                 _, exchange_code, _ = _get_exchange_from_ticker(ticker, isin)
                 if exchange_code:
-                    return f"{symbol}.{exchange_code}"
+                    return f"{symbol}-{exchange_code}"
                 else:
                     return f"{symbol}X"  # Pad with X if no exchange known
             return symbol
