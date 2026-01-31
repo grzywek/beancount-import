@@ -2175,77 +2175,104 @@ class Trading212Source(DescriptionBasedSource):
             postings=postings,
         )
 
-    def _make_csv_stock_split_transaction(self, csv_txn: CsvTransaction) -> Transaction:
-        """Create a beancount transaction for stock split open/close."""
-        date = csv_txn.time.date()
+    def _pair_csv_stock_splits(self) -> List[Tuple[CsvTransaction, CsvTransaction, D]]:
+        """Pair Stock split close/open transactions and calculate ratio.
         
-        symbol = self._get_beancount_symbol(csv_txn.ticker, csv_txn.isin)
-        symbol_account = f"{self.investment_account}:{symbol}"
+        Returns list of (close_txn, open_txn, ratio) tuples.
+        Ratio = new_shares / old_shares (e.g., 0.0625 for 16:1 reverse split)
+        """
+        if not self._csv_transactions:
+            return []
         
-        is_open = "open" in csv_txn.action.lower()
+        # Group by ticker and date
+        from collections import defaultdict
+        groups: Dict[Tuple[str, datetime.date], Dict[str, CsvTransaction]] = defaultdict(dict)
         
-        source_desc = f"{csv_txn.action}: {csv_txn.num_shares} {symbol}"
+        for txn in self._csv_transactions:
+            if txn.action not in ("Stock split open", "Stock split close"):
+                continue
+            key = (txn.ticker or txn.isin, txn.time.date())
+            if "close" in txn.action.lower():
+                groups[key]["close"] = txn
+            else:
+                groups[key]["open"] = txn
         
-        meta = {
-            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+        # Create pairs
+        pairs = []
+        for key, group in groups.items():
+            close_txn = group.get("close")
+            open_txn = group.get("open")
             
+            if close_txn and open_txn:
+                # Calculate ratio: new shares / old shares
+                old_shares = abs(close_txn.num_shares)
+                new_shares = abs(open_txn.num_shares)
+                
+                if old_shares > 0:
+                    ratio = new_shares / old_shares
+                else:
+                    ratio = D("1")
+                
+                pairs.append((close_txn, open_txn, ratio))
+            elif close_txn:
+                # Only close - treat as complete removal (ratio=0)
+                pairs.append((close_txn, None, D("0")))
+            elif open_txn:
+                # Only open - unusual, but generate with ratio from shares
+                pairs.append((None, open_txn, D("1")))
+        
+        return pairs
+    
+    def _make_csv_stock_split_directive(
+        self, 
+        close_txn: Optional[CsvTransaction], 
+        open_txn: Optional[CsvTransaction], 
+        ratio: D
+    ) -> Custom:
+        """Create a custom autobean.stock_split directive from CSV stock split transactions.
+        
+        Format: 2024-06-10 custom "autobean.stock_split" 0.0625 SBLX
+        """
+        # Use whichever transaction is available for metadata
+        txn = close_txn or open_txn
+        assert txn is not None
+        
+        date = txn.time.date()
+        symbol = self._get_beancount_symbol(txn.ticker, txn.isin)
+        
+        # Build metadata
+        meta = {
+            "filename": "<trading212-csv>",
+            "lineno": 0,
+            SOURCE_KEY: SOURCE_ID,
         }
         
-        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
-        if csv_txn.ticker:
-            meta[TICKER_KEY] = csv_txn.ticker
-        meta["transaction_time"] = csv_txn.time.isoformat()
+        # Use close transaction ref as primary (if available)
+        if close_txn:
+            meta[SOURCE_REF_KEY] = f"{close_txn.transaction_id}"
+            if close_txn.source_file:
+                meta[SOURCE_DOC_KEY] = os.path.basename(close_txn.source_file)
+        elif open_txn:
+            meta[SOURCE_REF_KEY] = f"{open_txn.transaction_id}"
+            if open_txn.source_file:
+                meta[SOURCE_DOC_KEY] = os.path.basename(open_txn.source_file)
         
-        from beancount.core.position import CostSpec
+        if txn.ticker:
+            meta[TICKER_KEY] = txn.ticker
+        if txn.isin:
+            meta[ISIN_KEY] = txn.isin
         
-        # For stock split, shares change but value stays same
-        # Open = remove old shares, Close = add new shares
-        quantity = csv_txn.num_shares if is_open else -abs(csv_txn.num_shares)
-        
-        # Clearing metadata
-        
-        postings = [
-            Posting(
-                account=symbol_account,
-                units=Amount(quantity, symbol),
-                cost=CostSpec(
-                    number_per=None,
-                    number_total=None,
-                    currency=csv_txn.currency,
-                    date=None,
-                    label=None,
-                    merge=None,
-                ),
-                price=None,
-                flag=None,
-                meta={**meta},
-            ),
-            # Balance against equity for stock split adjustments
-            Posting(
-                account="Equity:StockSplit",
-                units=None,  # Auto-balance
-                cost=None,
-                price=None,
-                flag=None,
-                meta=None,
-            ),
+        # Custom directive format: custom "autobean.stock_split" ratio COMMODITY
+        values = [
+            (ratio, Decimal),  # Decimal - ratio of new shares to old
+            (symbol, str),  # String - commodity symbol
         ]
         
-        narration = f"Stock Split {'Open' if is_open else 'Close'} - {symbol}"
-        
-        return Transaction(
-            meta={
-                "filename": "<trading212-csv>",
-                "lineno": 0,
-                
-            },
+        return Custom(
+            meta=meta,
             date=date,
-            flag="*",
-            payee="TRADING 212",
-            narration=narration,
-            tags=frozenset(),
-            links=frozenset(),
-            postings=postings,
+            type="autobean.stock_split",
+            values=values,
         )
 
     def _make_csv_adjustment_transaction(self, csv_txn: CsvTransaction) -> Transaction:
@@ -2431,6 +2458,15 @@ class Trading212Source(DescriptionBasedSource):
         matched_transaction_refs: Dict[str, List[Tuple[Transaction, Posting]]] = {}
         
         for entry in journal.all_entries:
+            # Match Custom directives (stock splits)
+            if isinstance(entry, Custom):
+                if entry.meta and SOURCE_REF_KEY in entry.meta:
+                    ref = entry.meta.get(SOURCE_REF_KEY)
+                    if ref:
+                        # Add to matched refs (Custom has no postings, so use None)
+                        matched_transaction_refs.setdefault(ref, [])
+                continue
+            
             if not isinstance(entry, Transaction):
                 continue
             for posting in entry.postings:
@@ -2442,6 +2478,10 @@ class Trading212Source(DescriptionBasedSource):
                 if source_ref and source_ref.startswith("trading212:"):
                     txn_id = source_ref[len("trading212:"):]
                     matched_transaction_refs.setdefault(txn_id, []).append((entry, posting))
+                
+                # Also match source_ref without prefix (new format)
+                if source_ref:
+                    matched_transaction_refs.setdefault(source_ref, []).append((entry, posting))
                 
                 # Legacy matching for backward compatibility
                 order_id = posting.meta.get(SOURCE_REF_KEY)
@@ -2532,11 +2572,9 @@ class Trading212Source(DescriptionBasedSource):
                     account_set.add(symbol_account)
                     
                 elif action in stock_split_actions:
-                    txn = self._make_csv_stock_split_transaction(csv_txn)
-                    txn_type = "trading212_stock_split"
-                    symbol = self._get_beancount_symbol(csv_txn.ticker, csv_txn.isin)
-                    symbol_account = f"{self.investment_account}:{symbol}"
-                    account_set.add(symbol_account)
+                    # Skip individual stock split transactions - they are paired and 
+                    # processed as custom "autobean.stock_split" directives after the loop
+                    continue
                     
                 elif action == "Result adjustment":
                     txn = self._make_csv_adjustment_transaction(csv_txn)
@@ -2572,6 +2610,42 @@ class Trading212Source(DescriptionBasedSource):
                             "transaction_ref": csv_txn.transaction_id,
                         },
                     ))
+        
+        # =====================================================================
+        # STOCK SPLITS FROM CSV (paired close/open -> custom directives)
+        # =====================================================================
+        
+        # Process paired stock splits and generate custom "autobean.stock_split" directives
+        stock_split_pairs = self._pair_csv_stock_splits()
+        for close_txn, open_txn, ratio in stock_split_pairs:
+            # Check if already matched
+            txn_ref = close_txn.transaction_id if close_txn else open_txn.transaction_id
+            if txn_ref in matched_transaction_refs:
+                continue
+            
+            # Also check the other ref if we have both transactions
+            if close_txn and open_txn:
+                if close_txn.transaction_id in matched_transaction_refs or \
+                   open_txn.transaction_id in matched_transaction_refs:
+                    continue
+            
+            directive = self._make_csv_stock_split_directive(close_txn, open_txn, ratio)
+            
+            # Get ticker for info
+            ref_txn = close_txn or open_txn
+            ticker = ref_txn.ticker if ref_txn else "UNKNOWN"
+            
+            results.add_pending_entry(ImportResult(
+                date=directive.date,
+                entries=[directive],
+                info={
+                    "type": "trading212_stock_split",
+                    "action": "Stock split",
+                    "ticker": ticker,
+                    "ratio": str(ratio),
+                    "transaction_ref": txn_ref,
+                },
+            ))
         
         # =====================================================================
         # PENDING ORDERS (from JSON - still useful for forecasting)
