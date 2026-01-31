@@ -294,6 +294,7 @@ def _ticker_to_base_symbol(ticker: str) -> str:
     - "AAPL_US_EQ" for US stocks → "AAPL"
     - "WTAIl_EQ" for European ETFs (lowercase 'l' = London) → "WTAI"
     - "BAl_EQ" for UK stocks → "BA"
+    - "EUSP.ESC" for ESG ETFs → "EUSP-ESC" (dots not allowed in Beancount)
     
     The lowercase letter suffix indicates the exchange/market.
     """
@@ -304,8 +305,11 @@ def _ticker_to_base_symbol(ticker: str) -> str:
     
     # Strip lowercase exchange suffix (e.g., 'l' for London, 'd' for Germany)
     # These are single lowercase letters at the end of otherwise uppercase symbols
-    if len(symbol) > 1 and symbol[-1].islower() and symbol[:-1].isupper():
+    if len(symbol) > 1 and symbol[-1].islower() and symbol[:-1].replace('.', '').replace('-', '').isupper():
         symbol = symbol[:-1]
+    
+    # Beancount doesn't allow dots in commodity names - replace with hyphen
+    symbol = symbol.replace('.', '-')
     
     return symbol
 
