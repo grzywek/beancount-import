@@ -10,7 +10,9 @@ Example configuration:
     dict(
         module="beancount_import.source.trading212",
         data_directory="/path/to/trading212/data",  # Directory with JSON files
-        cash_account="Assets:Trading212:Cash",
+        cash_vault_account="Assets:Trading212:Cash:Vault",  # USD with PLN cost basis
+        cash_trade_account="Assets:Trading212:Cash:Trade",  # Clean USD for trading
+        fx_income_account="Income:FX",  # FX P/L account
         investment_account="Assets:Trading212",
         dividend_income_account="Income:Dividends",
         capital_gains_account="Income:Capital-Gains",
@@ -423,7 +425,9 @@ class TransactionEntry:
 
 class Trading212SourceSpecDict(TypedDict, total=False):
     directory: str  # Directory containing JSON files from finance-dl
-    cash_account: str
+    cash_vault_account: str  # USD from PLN deposits with cost basis
+    cash_trade_account: str  # Clean USD from trading (can go negative)
+    fx_income_account: str  # FX P/L account
     investment_account: str
     dividend_income_account: str
     capital_gains_account: str
@@ -482,7 +486,9 @@ class Trading212Source(DescriptionBasedSource):
     def __init__(
         self,
         directory: str,  # Directory containing JSON files from finance-dl
-        cash_account: str = "Assets:Trading212:Cash",
+        cash_vault_account: str = "Assets:Trading212:Cash:Vault",  # USD with PLN cost
+        cash_trade_account: str = "Assets:Trading212:Cash:Trade",  # Clean USD for trading
+        fx_income_account: str = "Income:FX",  # FX P/L account
         investment_account: str = "Assets:Trading212",
         dividend_income_account: str = "Income:Dividends",
         capital_gains_account: str = "Income:Capital-Gains",
@@ -497,7 +503,9 @@ class Trading212Source(DescriptionBasedSource):
     ) -> None:
         super().__init__(log_status)
         self.data_directory = directory
-        self.cash_account = cash_account
+        self.cash_vault_account = cash_vault_account  # USD from PLN deposits with cost basis
+        self.cash_trade_account = cash_trade_account  # Clean USD from trading (can go negative)
+        self.fx_income_account = fx_income_account  # FX P/L
         self.investment_account = investment_account
         self.dividend_income_account = dividend_income_account
         self.capital_gains_account = capital_gains_account
@@ -509,7 +517,9 @@ class Trading212Source(DescriptionBasedSource):
         
         # Debug logging for account configuration
         print(f"[Trading212] Account configuration:", flush=True)
-        print(f"  cash_account: {self.cash_account}", flush=True)
+        print(f"  cash_vault_account: {self.cash_vault_account}", flush=True)
+        print(f"  cash_trade_account: {self.cash_trade_account}", flush=True)
+        print(f"  fx_income_account: {self.fx_income_account}", flush=True)
         print(f"  investment_account: {self.investment_account}", flush=True)
         print(f"  dividend_income_account: {self.dividend_income_account}", flush=True)
         print(f"  capital_gains_account: {self.capital_gains_account}", flush=True)
@@ -1096,7 +1106,7 @@ class Trading212Source(DescriptionBasedSource):
             else:
                 cash_amount = D(0)  # Fallback for edge cases
             postings.append(Posting(
-                account=self.cash_account,
+                account=self.cash_trade_account,
                 units=Amount(cash_amount, order.account_currency),
                 cost=None,
                 price=None,
@@ -1123,7 +1133,7 @@ class Trading212Source(DescriptionBasedSource):
             else:
                 cash_amount = D(0)  # Fallback for edge cases
             postings.append(Posting(
-                account=self.cash_account,
+                account=self.cash_trade_account,
                 units=Amount(cash_amount, order.account_currency),
                 cost=None,
                 price=None,
@@ -1218,7 +1228,7 @@ class Trading212Source(DescriptionBasedSource):
             else:
                 cash_amount = D(0)
             postings.append(Posting(
-                account=self.cash_account,
+                account=self.cash_trade_account,
                 units=Amount(cash_amount, order.account_currency),
                 cost=None,
                 price=None,
@@ -1243,7 +1253,7 @@ class Trading212Source(DescriptionBasedSource):
             else:
                 cash_amount = D(0)
             postings.append(Posting(
-                account=self.cash_account,
+                account=self.cash_trade_account,
                 units=Amount(cash_amount, order.account_currency),
                 cost=None,
                 price=None,
@@ -1302,7 +1312,7 @@ class Trading212Source(DescriptionBasedSource):
         postings = [
             # Cash received
             Posting(
-                account=self.cash_account,
+                account=self.cash_trade_account,
                 units=Amount(dividend.amount, dividend.currency),
                 cost=None,
                 price=None,
@@ -1359,7 +1369,7 @@ class Trading212Source(DescriptionBasedSource):
         if txn.transaction_type == "DEPOSIT":
             postings = [
                 Posting(
-                    account=self.cash_account,
+                    account=self.cash_trade_account,
                     units=Amount(txn.amount, txn.currency),
                     cost=None,
                     price=None,
@@ -1380,7 +1390,7 @@ class Trading212Source(DescriptionBasedSource):
         elif txn.transaction_type == "WITHDRAW":
             postings = [
                 Posting(
-                    account=self.cash_account,
+                    account=self.cash_trade_account,
                     units=Amount(-abs(txn.amount), txn.currency),
                     cost=None,
                     price=None,
@@ -1401,7 +1411,7 @@ class Trading212Source(DescriptionBasedSource):
         elif txn.transaction_type == "FEE":
             postings = [
                 Posting(
-                    account=self.cash_account,
+                    account=self.cash_trade_account,
                     units=Amount(-abs(txn.amount), txn.currency),
                     cost=None,
                     price=None,
@@ -1422,7 +1432,7 @@ class Trading212Source(DescriptionBasedSource):
         else:  # TRANSFER or other - needs manual review
             postings = [
                 Posting(
-                    account=self.cash_account,
+                    account=self.cash_trade_account,
                     units=Amount(txn.amount, txn.currency),
                     cost=None,
                     price=None,
@@ -1519,7 +1529,7 @@ class Trading212Source(DescriptionBasedSource):
         postings = [
             # Cash received
             Posting(
-                account=self.cash_account,
+                account=self.cash_trade_account,
                 units=Amount(csv_txn.total, csv_txn.currency),
                 cost=None,
                 price=None,
@@ -1584,7 +1594,7 @@ class Trading212Source(DescriptionBasedSource):
         postings = [
             # Cash debited
             Posting(
-                account=self.cash_account,
+                account=self.cash_trade_account,
                 units=Amount(-fee_amount, csv_txn.currency),
                 cost=None,
                 price=None,
@@ -1812,7 +1822,7 @@ class Trading212Source(DescriptionBasedSource):
         
         # Cash posting
         postings.append(Posting(
-            account=self.cash_account,
+            account=self.cash_trade_account,
             units=Amount(D(str(cash_amount)), csv_txn.currency),
             cost=None,
             price=None,
@@ -1933,7 +1943,7 @@ class Trading212Source(DescriptionBasedSource):
             gross_amount = gross_amount + abs(csv_txn.withholding_tax)
         
         postings.append(Posting(
-            account=self.cash_account,
+            account=self.cash_trade_account,
             units=Amount(csv_txn.total, csv_txn.currency),
             cost=None,
             price=None,
@@ -1954,15 +1964,39 @@ class Trading212Source(DescriptionBasedSource):
                 meta={**source_ref_meta, "tax_type": "withholding_tax"},
             ))
         
-        # Income source
-        postings.append(Posting(
-            account=income_account,
-            units=None,  # Auto-balance
-            cost=None,
-            price=None,
-            flag=None,
-            meta=source_ref_meta.copy(),
-        ))
+        # Income source - when tax is in different currency, we need explicit amounts
+        # in both currencies to balance properly
+        tax_currency = csv_txn.withholding_tax_currency or csv_txn.currency if csv_txn.withholding_tax else csv_txn.currency
+        if tax_currency != csv_txn.currency and csv_txn.withholding_tax:
+            # Different currencies - need two income postings:
+            # 1. Income to offset the cash received (dividend currency)
+            postings.append(Posting(
+                account=income_account,
+                units=Amount(-csv_txn.total, csv_txn.currency),
+                cost=None,
+                price=None,
+                flag=None,
+                meta=source_ref_meta.copy(),
+            ))
+            # 2. Income to offset the withholding tax (tax currency)
+            postings.append(Posting(
+                account=income_account,
+                units=Amount(-abs(csv_txn.withholding_tax), tax_currency),
+                cost=None,
+                price=None,
+                flag=None,
+                meta=source_ref_meta.copy(),
+            ))
+        else:
+            # Same currency - auto-balance works
+            postings.append(Posting(
+                account=income_account,
+                units=None,  # Auto-balance
+                cost=None,
+                price=None,
+                flag=None,
+                meta=source_ref_meta.copy(),
+            ))
         
         narration = f"Dividend ({div_type}) - {symbol}"
         
@@ -2006,7 +2040,7 @@ class Trading212Source(DescriptionBasedSource):
         
         postings = [
             Posting(
-                account=self.cash_account,
+                account=self.cash_vault_account,
                 units=Amount(csv_txn.total, csv_txn.currency),
                 cost=None,
                 price=None,
@@ -2070,16 +2104,33 @@ class Trading212Source(DescriptionBasedSource):
         # Total should be negative for withdrawal
         amount = -abs(csv_txn.total) if csv_txn.total > 0 else csv_txn.total
         
+        from beancount.core.position import CostSpec
+        
         # Clearing metadata
         
         postings = [
             Posting(
-                account=self.cash_account,
+                account=self.cash_vault_account,
                 units=Amount(amount, csv_txn.currency),
-                cost=None,
+                cost=CostSpec(
+                    number_per=None,  # FIFO matching
+                    number_total=None,
+                    currency="PLN",
+                    date=None,
+                    label=None,
+                    merge=None,
+                ),
                 price=None,
                 flag=None,
                 meta={**meta},
+            ),
+            Posting(
+                account=self.fx_income_account,
+                units=None,  # Auto-balance FX P/L
+                cost=None,
+                price=None,
+                flag=None,
+                meta=None,
             ),
             Posting(
                 account=self.transfer_account,
@@ -2267,9 +2318,10 @@ class Trading212Source(DescriptionBasedSource):
             meta[ISIN_KEY] = txn.isin
         
         # Custom directive format: custom "autobean.stock_split" ratio COMMODITY
+        # Use Amount(0, symbol) so commodity is printed without quotes
         values = [
             (ratio, Decimal),  # Decimal - ratio of new shares to old
-            (symbol, str),  # String - commodity symbol
+            (Amount(D('0'), symbol), Amount),  # Amount - commodity symbol (0 amount, just for the currency)
         ]
         
         return Custom(
@@ -2304,7 +2356,7 @@ class Trading212Source(DescriptionBasedSource):
         
         postings = [
             Posting(
-                account=self.cash_account,
+                account=self.cash_trade_account,
                 units=Amount(csv_txn.total, csv_txn.currency),
                 cost=None,
                 price=None,
@@ -2364,7 +2416,7 @@ class Trading212Source(DescriptionBasedSource):
                 "lineno": 0,
             },
             date=date,
-            account=self.cash_account,
+            account=self.cash_trade_account,
             amount=Amount(total_cash, summary.currency),
             tolerance=None,
             diff_amount=None,
@@ -2402,10 +2454,10 @@ class Trading212Source(DescriptionBasedSource):
             meta["note"] = ca.note
         
         # Custom directive format: custom "autobean.stock_split" ratio COMMODITY
-        # Values must be (value, dtype) tuples for beancount printer
+        # Use Amount(0, symbol) so commodity is printed without quotes
         values = [
             (ratio, Decimal),  # Decimal - ratio of new shares to old
-            (symbol, str),  # String - commodity symbol
+            (Amount(D('0'), symbol), Amount),  # Amount - commodity symbol (0 amount, just for the currency)
         ]
         
         return Custom(
@@ -2454,7 +2506,7 @@ class Trading212Source(DescriptionBasedSource):
             return
         
         # Build set of accounts we're authoritative for
-        account_set = {self.cash_account}
+        account_set = {self.cash_vault_account, self.cash_trade_account}
         
         # Collect all unique references from journal to match against
         matched_order_ids: Dict[str, List[Tuple[Transaction, Posting]]] = {}
@@ -2793,7 +2845,7 @@ class Trading212Source(DescriptionBasedSource):
                     Document(
                         meta=None,
                         date=max_date,
-                        account=self.cash_account,
+                        account=self.cash_trade_account,
                         filename=csv_path,  # Absolute path
                         tags=EMPTY_SET,
                         links=EMPTY_SET,
