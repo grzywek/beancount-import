@@ -359,7 +359,7 @@ export class CandidatesComponent extends React.PureComponent<
               title="Skip to previous pending entry, keyboard shortcut: ["
               className="action-button"
             >
-              Previous
+              &lt;
             </button>
             <button
               disabled={pendingIndex + 1 >= numPending}
@@ -367,7 +367,7 @@ export class CandidatesComponent extends React.PureComponent<
               title="Skip to next pending entry, keyboard shortcut: ]"
               className="action-button"
             >
-              Next
+              &gt;
             </button>
             <button
               disabled={pendingIndex + 1 >= numPending}
@@ -437,12 +437,19 @@ export class CandidatesComponent extends React.PureComponent<
             </button>
           </div>
           <div className="action-button__group">
-          <button
+            <button
               onClick={this.handleConfirm}
               title="Confirm selected candidate, keyboard shortcut: enter"
               className="action-button"
             >
               Confirm
+            </button>
+            <button
+              onClick={this.handleConfirmAll}
+              title="Confirm all pending entries"
+              className="action-button"
+            >
+              Confirm All
             </button>
             <button
               disabled={
@@ -503,7 +510,7 @@ export class CandidatesComponent extends React.PureComponent<
                 onHover={this.setHoverCandidate}
                 inputState={
                   inputState !== undefined &&
-                  inputState.candidateIndex === index
+                    inputState.candidateIndex === index
                     ? inputState
                     : undefined
                 }
@@ -768,5 +775,11 @@ export class CandidatesComponent extends React.PureComponent<
   };
   private handleConfirm = () => {
     this.acceptCandidate(this.state.selectedCandidateIndex);
+  };
+  private handleConfirmAll = async () => {
+    const { numPending } = this.props;
+    for (let i = 0; i < numPending; i++) {
+      await this.acceptCandidate(0);
+    }
   };
 }
