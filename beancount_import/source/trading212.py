@@ -92,11 +92,6 @@ SOURCE_DOC_KEY = 'document'  # Link to source document file
 # Source identifier for this importer
 SOURCE_ID = 'trading212'
 
-# Legacy keys for backward compatibility (matching old transactions)
-POSTING_META_ORDER_ID_KEY = SOURCE_REF_KEY
-POSTING_META_DIVIDEND_REF_KEY = "trading212_dividend_ref"
-POSTING_META_TRANSACTION_REF_KEY = "trading212_transaction_ref"
-
 
 class Trading212DataError(Exception):
     """Exception raised when data files cannot be loaded or parsed."""
@@ -375,7 +370,7 @@ class OrderEntry:
         return f"{self.order.side} {symbol} {self.order.filled_quantity} @ {self.order.filled_price}"
     
     def get_meta_key(self) -> str:
-        return POSTING_META_ORDER_ID_KEY
+        return SOURCE_REF_KEY
     
     def get_meta_value(self) -> str:
         return str(self.order.order_id)
@@ -394,7 +389,7 @@ class DividendEntry:
         return f"Dividend {symbol} {self.dividend.amount} {self.dividend.currency}"
     
     def get_meta_key(self) -> str:
-        return POSTING_META_DIVIDEND_REF_KEY
+        return SOURCE_REF_KEY
     
     def get_meta_value(self) -> str:
         return self.dividend.reference
@@ -412,7 +407,7 @@ class TransactionEntry:
         return f"{self.transaction.transaction_type} {self.transaction.amount} {self.transaction.currency}"
     
     def get_meta_key(self) -> str:
-        return POSTING_META_TRANSACTION_REF_KEY
+        return SOURCE_REF_KEY
     
     def get_meta_value(self) -> str:
         return self.transaction.reference
@@ -1037,7 +1032,7 @@ class Trading212Source(DescriptionBasedSource):
         meta = {
             SOURCE_REF_KEY: f"{order.order_id}",
             SOURCE_KEY: SOURCE_ID,
-            POSTING_META_ORDER_ID_KEY: str(order.order_id),
+            SOURCE_REF_KEY: str(order.order_id),
         }
         
         # Add all available order metadata
@@ -1149,7 +1144,7 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212>",
                 "lineno": 0,
-                POSTING_META_ORDER_ID_KEY: str(order.order_id),
+                SOURCE_REF_KEY: str(order.order_id),
             },
             date=date,
             flag="*",
@@ -1276,10 +1271,13 @@ class Trading212Source(DescriptionBasedSource):
         
         source_desc = f"Dividend {symbol} {dividend.amount} {dividend.currency}"
         
+        # Minimal meta for all postings on Trading212 accounts (for clearing)
+        source_ref_meta = {SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{dividend.reference}"}
+        
         meta = {
             SOURCE_REF_KEY: f"{dividend.reference}",
             SOURCE_KEY: SOURCE_ID,
-            POSTING_META_DIVIDEND_REF_KEY: dividend.reference,
+            SOURCE_REF_KEY: dividend.reference,
         }
         
         # Add all available dividend metadata
@@ -1314,7 +1312,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta=source_ref_meta.copy(),
             ),
         ]
         
@@ -1324,7 +1322,7 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212>",
                 "lineno": 0,
-                POSTING_META_DIVIDEND_REF_KEY: dividend.reference,
+                SOURCE_REF_KEY: dividend.reference,
             },
             date=dividend.paid_on,
             flag="*",
@@ -1343,7 +1341,7 @@ class Trading212Source(DescriptionBasedSource):
         
         meta = {
             SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
-            POSTING_META_TRANSACTION_REF_KEY: txn.reference,
+            SOURCE_REF_KEY: txn.reference,
         }
         
         # Add all available transaction metadata
@@ -1447,7 +1445,7 @@ class Trading212Source(DescriptionBasedSource):
             meta={
                 "filename": "<trading212>",
                 "lineno": 0,
-                POSTING_META_TRANSACTION_REF_KEY: txn.reference,
+                SOURCE_REF_KEY: txn.reference,
             },
             date=date,
             flag="*",
@@ -1531,7 +1529,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{csv_txn.transaction_id}"},
             ),
         ]
         
@@ -1671,7 +1669,7 @@ class Trading212Source(DescriptionBasedSource):
                 cost=None,
                 price=None,
                 flag=None,
-                meta=None,
+                meta={SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{csv_txn.transaction_id}"},
             ),
         ]
         
@@ -1959,7 +1957,7 @@ class Trading212Source(DescriptionBasedSource):
             cost=None,
             price=None,
             flag=None,
-            meta=None,
+            meta=source_ref_meta.copy(),
         ))
         
         narration = f"Dividend ({div_type}) - {symbol}"
@@ -2410,7 +2408,7 @@ class Trading212Source(DescriptionBasedSource):
     ) -> Dict[str, Union[str, Sequence[str]]]:
         result = super().get_example_key_value_pairs(transaction, posting)
         if posting.meta:
-            for key in (POSTING_META_ORDER_ID_KEY, POSTING_META_DIVIDEND_REF_KEY, POSTING_META_TRANSACTION_REF_KEY):
+            for key in (SOURCE_REF_KEY, SOURCE_REF_KEY, SOURCE_REF_KEY):
                 value = posting.meta.get(key)
                 if value:
                     result[key] = value
@@ -2446,11 +2444,11 @@ class Trading212Source(DescriptionBasedSource):
                     matched_transaction_refs.setdefault(txn_id, []).append((entry, posting))
                 
                 # Legacy matching for backward compatibility
-                order_id = posting.meta.get(POSTING_META_ORDER_ID_KEY)
+                order_id = posting.meta.get(SOURCE_REF_KEY)
                 if order_id and order_id != source_ref:  # Avoid duplicate if same as source_ref
                     matched_order_ids.setdefault(order_id, []).append((entry, posting))
                 
-                div_ref = posting.meta.get(POSTING_META_DIVIDEND_REF_KEY)
+                div_ref = posting.meta.get(SOURCE_REF_KEY)
                 if div_ref:
                     matched_dividend_refs.setdefault(div_ref, []).append((entry, posting))
         
