@@ -680,7 +680,7 @@ class ZenSource(Source):
                         matched_ids.setdefault(ref, []).append((entry, posting))
 
         # Track for balance assertions
-        balances_by_account: Dict[str, List[Tuple[datetime.date, Decimal, str]]] = {}
+        balances_by_account: Dict[str, List[Tuple[datetime.date, Decimal, str, str]]] = {}
         
         # Find FX pairs first
         fx_pairs, paired_source_keys, paired_target_keys = self._find_fx_pairs()
@@ -727,13 +727,13 @@ class ZenSource(Source):
             src_account = self._get_account_for_id(src_account_id)
             if src_account:
                 balances_by_account.setdefault(src_account, []).append(
-                    (pair.source_txn.date, pair.source_txn.balance_after, pair.source_txn.settlement_currency)
+                    (pair.source_txn.date, pair.source_txn.balance_after, pair.source_txn.settlement_currency, pair.source_statement.filename)
                 )
             
             tgt_account = self._get_account_for_id(tgt_account_id)
             if tgt_account:
                 balances_by_account.setdefault(tgt_account, []).append(
-                    (pair.target_txn.date, pair.target_txn.balance_after, pair.target_txn.settlement_currency)
+                    (pair.target_txn.date, pair.target_txn.balance_after, pair.target_txn.settlement_currency, pair.target_statement.filename)
                 )
         
         # Process remaining (non-paired) transactions
