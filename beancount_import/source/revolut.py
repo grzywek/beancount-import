@@ -829,6 +829,8 @@ class RevolutSource(Source):
 
         self.statements: List[CsvStatementInfo] = []
         self.transactions: List[Tuple[CsvStatementInfo, RevolutTransaction]] = []
+        # Track all loaded files for Document directives: (filepath, account_type, currencies)
+        self._loaded_files: List[Tuple[str, str, List[str]]] = []
         
         self._load_all_data()
 
@@ -855,12 +857,16 @@ class RevolutSource(Source):
                     csv_files.append((filepath, account_type))
                 elif filename.endswith('.pdf'):
                     pdf_files.append((filepath, account_type))
+                elif filename.endswith('.json'):
+                    pass  # Ignore JSON files
         
         # Parse all PDFs first to build supplementary data - grouped by account_type
         pdf_sections_by_account: Dict[str, Dict[str, PdfCurrencySection]] = {}
+        pdf_parsed_currencies: Dict[str, Set[str]] = {}  # per-file currencies for Document directives
         for pdf_path, account_type in pdf_files:
             try:
                 sections = parse_pdf(pdf_path)
+                pdf_parsed_currencies[pdf_path] = set(sections.keys())
                 if account_type not in pdf_sections_by_account:
                     pdf_sections_by_account[account_type] = {}
                 
@@ -900,9 +906,39 @@ class RevolutSource(Source):
             for txn in stmt.transactions:
                 self.transactions.append((stmt, txn))
         
+        # Track all loaded files for Document directives
+        # CSV files: get currencies from parsed statements
+        csv_currencies: Dict[str, Set[str]] = {}  # filepath -> set of currencies
+        for stmt in self.statements:
+            csv_currencies.setdefault(stmt.filename, set())
+            for txn in stmt.transactions:
+                csv_currencies[stmt.filename].add(txn.currency)
+        
+        for csv_path, account_type in csv_files:
+            currencies = sorted(csv_currencies.get(csv_path, set()))
+            if currencies:
+                self._loaded_files.append((csv_path, account_type, currencies))
+        
+        # PDF files: use currencies already collected during enrichment parse
+        for pdf_path, account_type in pdf_files:
+            pdf_currencies = sorted(pdf_parsed_currencies.get(pdf_path, set()))
+            if pdf_currencies:
+                self._loaded_files.append((pdf_path, account_type, pdf_currencies))
+            else:
+                # PDF with no parseable currencies — still track it
+                # Use all currencies known for this account_type from CSVs
+                known_currencies = set()
+                for stmt in self.statements:
+                    if stmt.account_type == account_type:
+                        for txn in stmt.transactions:
+                            known_currencies.add(txn.currency)
+                if known_currencies:
+                    self._loaded_files.append((pdf_path, account_type, sorted(known_currencies)))
+        
         self.log_status(
             f'revolut: loaded {len(self.statements)} statements, '
-            f'{len(self.transactions)} transactions'
+            f'{len(self.transactions)} transactions, '
+            f'{len(self._loaded_files)} source files'
         )
 
     def _get_account_for_id(self, account_id: str) -> Optional[str]:
@@ -1259,46 +1295,65 @@ class RevolutSource(Source):
                 results.add_invalid_reference(
                     InvalidSourceReference(0, entries))
         
-        # Generate Document directives for source CSV files
-        # (PDF files are used for enrichment only, CSV is the primary source)
+        # Generate Document directives for all source files (CSV + PDF)
         # Note: Duplicate detection is handled centrally in reconcile.py
-        seen_files: Set[str] = set()
+        # 
+        # Build a date map for files from transactions
+        file_max_dates: Dict[str, datetime.date] = {}
         for statement, txn in self.transactions:
-            if statement.filename in seen_files:
-                continue
-            seen_files.add(statement.filename)
+            txn_date = txn.completed_date or txn.started_date
+            if statement.filename not in file_max_dates or txn_date > file_max_dates[statement.filename]:
+                file_max_dates[statement.filename] = txn_date
+        
+        # Try to extract date from PDF filenames (e.g., account-statement_2025-01-01_2025-12-31_en_xxx.pdf)
+        date_range_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})')
+        
+        for filepath, account_type, currencies in self._loaded_files:
+            doc_basename = os.path.basename(filepath)
             
-            doc_basename = os.path.basename(statement.filename)
+            # Determine document date
+            doc_date = file_max_dates.get(filepath)
+            if doc_date is None:
+                # Try to extract end date from filename
+                m = date_range_pattern.search(doc_basename)
+                if m:
+                    doc_date = datetime.date.fromisoformat(m.group(2))
+                else:
+                    continue  # No date available — skip
             
-            account_id = f"{statement.account_type}_{txn.currency}"
-            target_account = self._get_account_for_id(account_id)
-            if target_account is None:
-                continue
+            # Determine content type from extension
+            if filepath.endswith('.pdf'):
+                content_type = 'application/pdf'
+            else:
+                content_type = 'text/csv'
             
-            # Find max date from this file
-            max_date = max(
-                (t.completed_date or t.started_date for s, t in self.transactions if s.filename == statement.filename),
-                default=datetime.date.today()
-            )
-            
-            results.add_pending_entry(
-                ImportResult(
-                    date=max_date,
-                    entries=[
-                        Document(
-                            meta=None,
-                            date=max_date,
-                            account=target_account,
-                            filename=statement.filename,  # Absolute path
-                            tags=EMPTY_SET,
-                            links=EMPTY_SET,
-                        )
-                    ],
-                    info=dict(
-                        type='text/csv',
-                        filename=doc_basename,
-                    ),
-                ))
+            # Generate a Document for the first mapped account for this file
+            # (each file is associated with one account_type, pick the first matching currency)
+            for currency in currencies:
+                account_id = f"{account_type}_{currency}"
+                target_account = self._get_account_for_id(account_id)
+                if target_account is None:
+                    continue
+                
+                results.add_pending_entry(
+                    ImportResult(
+                        date=doc_date,
+                        entries=[
+                            Document(
+                                meta=None,
+                                date=doc_date,
+                                account=target_account,
+                                filename=filepath,  # Absolute path
+                                tags=EMPTY_SET,
+                                links=EMPTY_SET,
+                            )
+                        ],
+                        info=dict(
+                            type=content_type,
+                            filename=doc_basename,
+                        ),
+                    ))
+                break  # One Document per file (not per currency)
 
 
 def load(spec: dict, log_status):

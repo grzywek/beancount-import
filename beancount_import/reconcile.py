@@ -393,6 +393,22 @@ def stage_missing_accounts(stage, entry_file_selector, account_map=None):
 
 def make_pending_entry(import_result: ImportResult, source: Optional[Source]):
     printer = beancount.parser.printer.EntryPrinter()
+    # Defensive check: catch postings with None account before printer crashes
+    for e in import_result.entries:
+        if isinstance(e, Transaction):
+            for p in e.postings:
+                if p.account is None:
+                    source_name = source.name if source else 'unknown'
+                    print(f'[reconcile] ERROR: posting.account is None in transaction from source={source_name}')
+                    print(f'  narration={e.narration!r}, payee={e.payee!r}, date={e.date}')
+                    print(f'  meta={e.meta}')
+                    print(f'  posting meta={p.meta}')
+                    print(f'  info={import_result.info}')
+                    raise ValueError(
+                        f'posting.account is None in transaction from source={source_name}: '
+                        f'payee={e.payee!r}, narration={e.narration!r}, date={e.date}, '
+                        f'info={import_result.info}'
+                    )
     formatted = '\n'.join(printer(e) for e in import_result.entries)
     identifier = hashlib.sha256(formatted.encode()).hexdigest()
     return PendingEntry(

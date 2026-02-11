@@ -326,6 +326,9 @@ def get_info(txn: EnableBankingTransaction) -> dict:
     )
 
 
+_BANKS_NOT_SET = object()  # Sentinel to distinguish "banks not specified" from "banks: null"
+
+
 class EnableBankingSource(Source):
     """EnableBanking JSON transaction source."""
 
@@ -334,7 +337,7 @@ class EnableBankingSource(Source):
         directory: str,
         account_map: Optional[Dict[str, str]] = None,
         default_account: Optional[str] = None,
-        banks: Optional[List[str]] = None,
+        banks = _BANKS_NOT_SET,
         exclude_banks: Optional[List[str]] = None,
         **kwargs,
     ) -> None:
@@ -344,8 +347,9 @@ class EnableBankingSource(Source):
             directory: Directory containing bank subdirectories with JSON files.
             account_map: Dictionary mapping account_id (IBAN_CURRENCY) to Beancount account.
             default_account: Fallback account when account not in account_map.
-            banks: Optional list of bank subdirectory names to import (e.g., ['mbank', 'revolut']).
-                   If not specified, all bank subdirectories are imported.
+            banks: List of bank subdirectory names to import (e.g., ['mbank', 'pekao']).
+                   If not specified (key omitted), all bank subdirectories are imported.
+                   If set to null/empty (YAML 'banks:' with items commented out), no banks are loaded.
             exclude_banks: Optional list of bank subdirectory names to exclude.
                           Use this when you have dedicated importers for specific banks (e.g., ['Revolut']).
             **kwargs: Additional arguments passed to Source.
@@ -355,7 +359,13 @@ class EnableBankingSource(Source):
         
         self.account_map: Dict[str, str] = account_map or {}
         self.default_account = default_account
-        self.banks = banks  # None means all banks
+        # banks=None (from YAML 'banks:' with all items commented out) → no banks loaded
+        # banks not passed at all (sentinel default) → all banks loaded  
+        # banks=['mbank'] → only listed banks loaded
+        if banks is _BANKS_NOT_SET:
+            self.banks = None  # None = all banks
+        else:
+            self.banks = banks if banks else []  # empty/None = no banks
         self.exclude_banks = set(exclude_banks or [])  # Banks to skip
         
         if not self.default_account and not self.account_map:
