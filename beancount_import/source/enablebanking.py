@@ -86,43 +86,7 @@ TRANSACTION_DATE_KEY = 'transaction_date'  # Value/transaction date (when money 
 SOURCE_DOC_KEY = 'document'  # Link to source document file (clickable in fava)
 BOOKING_DATE_KEY = 'booking_date'  # Booking date (when bank recorded it)
 
-# Pattern to match files that already have a 4-digit suffix before extension
-SUFFIX_PATTERN = re.compile(r'-\d{4}(\.[^.]+)?$')
 
-
-def ensure_file_has_suffix(filepath: str) -> str:
-    """Ensure file has a 4-digit suffix, renaming it if needed.
-    
-    If the file doesn't have a suffix like '-1234', generate a random one
-    and physically rename the file on disk.
-    
-    Args:
-        filepath: Full path to the file.
-        
-    Returns:
-        The new filepath (with suffix) or original if already had one.
-    """
-    import random
-    
-    basename = os.path.basename(filepath)
-    
-    # Check if file already has a 4-digit suffix
-    if SUFFIX_PATTERN.search(basename):
-        return filepath  # Already has suffix
-    
-    # Generate new filename with suffix
-    base, ext = os.path.splitext(filepath)
-    suffix = random.randint(1000, 9999)
-    new_filepath = f"{base}-{suffix}{ext}"
-    
-    # Physically rename the file
-    try:
-        os.rename(filepath, new_filepath)
-        return new_filepath
-    except OSError as e:
-        # If rename fails (permissions, etc.), return original
-        print(f"Warning: could not rename {filepath} to {new_filepath}: {e}")
-        return filepath
 
 
 def _split_counterparty_address(name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -437,13 +401,16 @@ class EnableBankingSource(Source):
             for filename in os.listdir(bank_path):
                 if filename.startswith('transactions_') and filename.endswith('.json'):
                     txn_path = os.path.join(bank_path, filename)
-                    # Extract account_id from filename: transactions_IBAN_CURRENCY[-suffix].json
+                    # Extract account_id from filename
+                    # Supports both formats:
+                    #   transactions_IBAN_CURRENCY[-suffix].json (legacy)
+                    #   transactions_IBAN_CURRENCY_YYYY-MM-DD_to_YYYY-MM-DD.json (new)
                     # Remove the 'transactions_' prefix and '.json' suffix
                     account_id = filename[len('transactions_'):-len('.json')]
-                    # Strip the random suffix if present (e.g., '-7277')
-                    if SUFFIX_PATTERN.search(account_id):
-                        # Remove the -NNNN suffix
-                        account_id = re.sub(r'-\d{4}$', '', account_id)
+                    # Strip date-range suffix if present (e.g., '_2025-02-04_to_2026-02-10')
+                    account_id = re.sub(r'_\d{4}-\d{2}-\d{2}_to_\d{4}-\d{2}-\d{2}$', '', account_id)
+                    # Strip legacy -NNNN suffix if present
+                    account_id = re.sub(r'-\d{4}$', '', account_id)
                     self._load_transactions(txn_path, account_id, bank_name)
         
         self.log_status(
@@ -496,8 +463,7 @@ class EnableBankingSource(Source):
                 actual_bank = acc.bank
                 break
         
-        # Ensure file has unique suffix, renaming if needed
-        path = ensure_file_has_suffix(path)
+
         
         # Store full path for Document directive
         source_filename = path
@@ -676,7 +642,6 @@ class EnableBankingSource(Source):
                 doc_groups[key] = txn.booking_date
         
         # Generate Document directives for source files
-        # Files already have unique suffix from ensure_file_has_suffix during load
         # Note: Duplicate detection is handled centrally in reconcile.py
         for (account_id, source_filename), max_date in doc_groups.items():
             target_account = self._get_account_for_id(account_id)

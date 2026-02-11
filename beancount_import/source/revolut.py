@@ -133,30 +133,6 @@ def normalize_transaction_type(raw_type: str) -> str:
     return TRANSACTION_TYPE_MAP.get(raw_type, raw_type)
 
 
-# Pattern to match files that already have a 4-digit suffix before extension
-SUFFIX_PATTERN = re.compile(r'-\d{4}(\.[^.]+)?$')
-
-
-def ensure_file_has_suffix(filepath: str) -> str:
-    """Ensure file has a 4-digit suffix, renaming it if needed."""
-    import random
-    
-    basename = os.path.basename(filepath)
-    
-    if SUFFIX_PATTERN.search(basename):
-        return filepath
-    
-    base, ext = os.path.splitext(filepath)
-    suffix = random.randint(1000, 9999)
-    new_filepath = f"{base}-{suffix}{ext}"
-    
-    try:
-        os.rename(filepath, new_filepath)
-        return new_filepath
-    except OSError as e:
-        print(f"Warning: could not rename {filepath} to {new_filepath}: {e}")
-        return filepath
-
 
 def parse_revolut_date(text: str) -> datetime.date:
     """Parse Revolut date format: '2025-01-02 02:19:20'.
@@ -876,10 +852,8 @@ class RevolutSource(Source):
                 filepath = os.path.join(root, filename)
                 
                 if filename.endswith('.csv'):
-                    filepath = ensure_file_has_suffix(filepath)
                     csv_files.append((filepath, account_type))
                 elif filename.endswith('.pdf'):
-                    filepath = ensure_file_has_suffix(filepath)
                     pdf_files.append((filepath, account_type))
         
         # Parse all PDFs first to build supplementary data - grouped by account_type

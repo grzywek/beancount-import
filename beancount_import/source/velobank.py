@@ -130,43 +130,6 @@ SOURCE_DOC_KEY = 'document'  # Link to source document file (clickable in fava)
 # Currency
 DEFAULT_CURRENCY = 'PLN'
 
-# Pattern to match files that already have a 4-digit suffix before extension
-SUFFIX_PATTERN = re.compile(r'-\d{4}(\.[^.]+)?$')
-
-
-def ensure_file_has_suffix(filepath: str) -> str:
-    """Ensure file has a 4-digit suffix, renaming it if needed.
-    
-    If the file doesn't have a suffix like '-1234', generate a random one
-    and physically rename the file on disk.
-    
-    Args:
-        filepath: Full path to the file.
-        
-    Returns:
-        The new filepath (with suffix) or original if already had one.
-    """
-    import random
-    
-    basename = os.path.basename(filepath)
-    
-    # Check if file already has a 4-digit suffix
-    if SUFFIX_PATTERN.search(basename):
-        return filepath  # Already has suffix
-    
-    # Generate new filename with suffix
-    base, ext = os.path.splitext(filepath)
-    suffix = random.randint(1000, 9999)
-    new_filepath = f"{base}-{suffix}{ext}"
-    
-    # Physically rename the file
-    try:
-        os.rename(filepath, new_filepath)
-        return new_filepath
-    except OSError as e:
-        # If rename fails (permissions, etc.), return original
-        print(f"Warning: could not rename {filepath} to {new_filepath}: {e}")
-        return filepath
 
 # Polish to English transaction type translations
 # This is the closed catalog of known transaction types
@@ -2247,8 +2210,7 @@ class VelobankSource(Source):
         # Load PDF statements
         for pdf_path in pdf_files:
             try:
-                # Ensure file has unique suffix, renaming if needed
-                pdf_path = ensure_file_has_suffix(pdf_path)
+
                 
                 self.log_status(f'velobank: loading {pdf_path}')
                 statement = parse_pdf_statement(pdf_path)
@@ -2265,8 +2227,7 @@ class VelobankSource(Source):
                 if 'karty kredytowej' not in content.lower():
                     continue  # Skip non-credit-card HTML files
                     
-                # Ensure file has unique suffix, renaming if needed
-                html_path = ensure_file_has_suffix(html_path)
+
                 
                 self.log_status(f'velobank: loading HTML {html_path}')
                 statement = parse_credit_card_html(html_path)
@@ -2424,7 +2385,6 @@ class VelobankSource(Source):
                     InvalidSourceReference(len(postings), postings))
 
         # Generate Document directives for source files
-        # Files already have unique suffix from ensure_file_has_suffix during load
         # Note: Duplicate detection is handled centrally in reconcile.py
         for statement in self.statements:
             if not statement.transactions:

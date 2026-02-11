@@ -107,43 +107,6 @@ TRANSACTION_TYPES = {
 }
 
 
-# Pattern to match files that already have a 4-digit suffix before extension
-SUFFIX_PATTERN = re.compile(r'-\d{4}(\.[^.]+)?$')
-
-
-def ensure_file_has_suffix(filepath: str) -> str:
-    """Ensure file has a 4-digit suffix, renaming it if needed.
-    
-    If the file doesn't have a suffix like '-1234', generate a random one
-    and physically rename the file on disk.
-    
-    Args:
-        filepath: Full path to the file.
-        
-    Returns:
-        The new filepath (with suffix) or original if already had one.
-    """
-    import random
-    
-    basename = os.path.basename(filepath)
-    
-    # Check if file already has a 4-digit suffix
-    if SUFFIX_PATTERN.search(basename):
-        return filepath  # Already has suffix
-    
-    # Generate new filename with suffix
-    base, ext = os.path.splitext(filepath)
-    suffix = random.randint(1000, 9999)
-    new_filepath = f"{base}-{suffix}{ext}"
-    
-    # Physically rename the file
-    try:
-        os.rename(filepath, new_filepath)
-        return new_filepath
-    except OSError as e:
-        # If rename fails (permissions, etc.), return original
-        print(f"Warning: could not rename {filepath} to {new_filepath}: {e}")
-        return filepath
 
 
 def parse_zen_date(text: str) -> datetime.date:
@@ -548,8 +511,7 @@ class ZenSource(Source):
                 
                 path = os.path.join(root, filename)
                 
-                # Ensure file has unique suffix, renaming if needed
-                path = ensure_file_has_suffix(path)
+
                 
                 statement = parse_csv(path)
                 
@@ -863,7 +825,7 @@ class ZenSource(Source):
                     InvalidSourceReference(len(postings), postings))
 
         # Generate Document directives for source files
-        # Files already have unique suffix from ensure_file_has_suffix during load
+
         # Note: Duplicate detection is handled centrally in reconcile.py
         for statement in self.statements:
             if not statement.transactions:

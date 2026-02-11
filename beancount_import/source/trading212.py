@@ -895,7 +895,7 @@ class Trading212Source(DescriptionBasedSource):
                             exchange_rate=safe_decimal(row.get("Exchange rate", "")),
                             result=safe_decimal(row.get("Result", "")),
                             result_currency=safe_str(row.get("Currency (Result)")),
-                            currency=row.get("Currency (Total)", "USD"),
+                            currency=row.get("Currency (Total)") or "USD",
                             total=safe_decimal(row.get("Total", "0")) or D(0),
                             withholding_tax=safe_decimal(row.get("Withholding tax", "")),
                             withholding_tax_currency=safe_str(row.get("Currency (Withholding tax)")),
