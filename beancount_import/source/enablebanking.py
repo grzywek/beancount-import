@@ -367,6 +367,7 @@ class EnableBankingSource(Source):
         # Store loaded data
         self.accounts: List[EnableBankingAccount] = []
         self.transactions: List[EnableBankingTransaction] = []
+        self._loaded_files: List[Tuple[str, str]] = []  # (account_id, source_filename)
         
         # Load all data
         self._load_all_data()
@@ -467,6 +468,7 @@ class EnableBankingSource(Source):
         
         # Store full path for Document directive
         source_filename = path
+        self._loaded_files.append((account_id, source_filename))
         
         for txn_data in data.get('transactions', []):
             txn = _parse_transaction(txn_data, account_id, actual_bank, source_filename)
@@ -617,7 +619,13 @@ class EnableBankingSource(Source):
                         entries=[
                             Balance(
                                 date=balance_date,
-                                meta=None,
+                                meta=collections.OrderedDict([
+                                    ('filename', '<enablebanking>'),
+                                    ('lineno', 0),
+                                    ('source', 'enablebanking'),
+                                    ('document', os.path.basename(txn.source_filename)),
+                                    ('balance_date', str(txn.booking_date)),
+                                ]),
                                 account=target_account,
                                 amount=Amount(txn.balance_after, txn.currency),
                                 tolerance=None,
@@ -634,30 +642,49 @@ class EnableBankingSource(Source):
                     InvalidSourceReference(len(postings), postings))
 
         # Generate Document directives for source files
-        # Group transactions by (account_id, source_filename) to find max date per file
-        doc_groups: Dict[Tuple[str, str], datetime.date] = {}
+        # Use the 'to' date from filename range as document date, 
+        # falling back to max(booking_date) for legacy files without date range
+        
+        # Collect all source files from loaded transactions
+        doc_files: Dict[Tuple[str, str], datetime.date] = {}
         for txn in self.transactions:
             key = (txn.account_id, txn.source_filename)
-            if key not in doc_groups or txn.booking_date > doc_groups[key]:
-                doc_groups[key] = txn.booking_date
+            if key not in doc_files or txn.booking_date > doc_files[key]:
+                doc_files[key] = txn.booking_date
         
-        # Generate Document directives for source files
+        # Also include files tracked during loading (covers empty files)
+        for account_id, source_filename in self._loaded_files:
+            key = (account_id, source_filename)
+            if key not in doc_files:
+                doc_files[key] = None  # No transactions — date from filename
+        
         # Note: Duplicate detection is handled centrally in reconcile.py
-        for (account_id, source_filename), max_date in doc_groups.items():
+        date_range_pattern = re.compile(r'_(\d{4}-\d{2}-\d{2})_to_(\d{4}-\d{2}-\d{2})\.json$')
+        
+        for (account_id, source_filename), fallback_date in doc_files.items():
             target_account = self._get_account_for_id(account_id)
             if target_account is None:
                 continue
             
             doc_basename = os.path.basename(source_filename)
             
+            # Extract 'to' date from filename if it has date-range format
+            m = date_range_pattern.search(doc_basename)
+            if m:
+                doc_date = datetime.date.fromisoformat(m.group(2))
+            elif fallback_date:
+                doc_date = fallback_date
+            else:
+                continue  # No date available — skip
+            
             # Use absolute path - SourceResults will convert to relative if needed
             results.add_pending_entry(
                 ImportResult(
-                    date=max_date,
+                    date=doc_date,
                     entries=[
                         Document(
                             meta=None,
-                            date=max_date,
+                            date=doc_date,
                             account=target_account,
                             filename=source_filename,  # Absolute path
                             tags=EMPTY_SET,

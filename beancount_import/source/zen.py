@@ -774,7 +774,7 @@ class ZenSource(Source):
                 if target_account not in balances_by_account:
                     balances_by_account[target_account] = []
                 balances_by_account[target_account].append(
-                    (txn.date, txn.balance_after, txn.settlement_currency)
+                    (txn.date, txn.balance_after, txn.settlement_currency, statement.filename)
                 )
 
         # Generate monthly balance assertions
@@ -786,13 +786,13 @@ class ZenSource(Source):
             balance_list.sort(key=lambda x: x[0])
             
             # Group by year-month and keep last balance
-            monthly_balances: Dict[Tuple[int, int], Tuple[Decimal, str]] = {}
-            for date, balance, currency in balance_list:
+            monthly_balances: Dict[Tuple[int, int], Tuple[Decimal, str, datetime.date, str]] = {}
+            for date, balance, currency, src_filename in balance_list:
                 year_month = (date.year, date.month)
-                monthly_balances[year_month] = (balance, currency)
+                monthly_balances[year_month] = (balance, currency, date, src_filename)
             
             # Generate balance assertion for each completed month
-            for (year, month), (balance, currency) in monthly_balances.items():
+            for (year, month), (balance, currency, src_date, src_filename) in monthly_balances.items():
                 if (year, month) == current_year_month:
                     continue
                 
@@ -808,7 +808,13 @@ class ZenSource(Source):
                         entries=[
                             Balance(
                                 date=balance_date,
-                                meta=None,
+                                meta=collections.OrderedDict([
+                                    ('filename', '<zen>'),
+                                    ('lineno', 0),
+                                    ('source', 'zen'),
+                                    ('document', os.path.basename(src_filename)),
+                                    ('balance_date', str(src_date)),
+                                ]),
                                 account=account,
                                 amount=Amount(balance, currency),
                                 tolerance=None,

@@ -1215,7 +1215,7 @@ class RevolutSource(Source):
                 
                 # Track balance
                 balances_by_account.setdefault(target_account, []).append(
-                    (txn.completed_date or txn.started_date, txn.balance_after, txn.currency)
+                    (txn.completed_date or txn.started_date, txn.balance_after, txn.currency, statement.filename)
                 )
 
         # Generate balance assertions
@@ -1224,18 +1224,21 @@ class RevolutSource(Source):
                 continue
             
             # Get latest balance per date
-            latest_by_date: Dict[datetime.date, Tuple[Decimal, str]] = {}
-            for date, balance, currency in balances:
-                latest_by_date[date] = (balance, currency)
+            latest_by_date: Dict[datetime.date, Tuple[Decimal, str, str]] = {}
+            for date, balance, currency, src_filename in balances:
+                latest_by_date[date] = (balance, currency, src_filename)
             
             # Add balance assertions for the latest date
             latest_date = max(latest_by_date.keys())
-            balance_amount, currency = latest_by_date[latest_date]
+            balance_amount, currency, src_filename = latest_by_date[latest_date]
             
             balance_entry = Balance(
                 meta=collections.OrderedDict([
                     ('filename', '<revolut>'),
                     ('lineno', 0),
+                    ('source', 'revolut'),
+                    ('document', os.path.basename(src_filename)),
+                    ('balance_date', str(latest_date)),
                 ]),
                 date=latest_date + datetime.timedelta(days=1),
                 account=account,

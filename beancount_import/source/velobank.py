@@ -2364,7 +2364,13 @@ class VelobankSource(Source):
                         entries=[
                             Balance(
                                 date=balance_date,
-                                meta=None,
+                                meta=collections.OrderedDict([
+                                    ('filename', '<velobank>'),
+                                    ('lineno', 0),
+                                    ('source', 'velobank'),
+                                    ('document', os.path.basename(statement.filename)),
+                                    ('period_end', str(statement.period_end)),
+                                ]),
                                 account=target_account,
                                 amount=Amount(last_txn.balance_after, DEFAULT_CURRENCY),
                                 tolerance=None,
