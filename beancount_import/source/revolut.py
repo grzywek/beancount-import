@@ -988,7 +988,10 @@ class RevolutSource(Source):
         """Check if posting is cleared."""
         if posting.meta is None:
             return False
-        return SOURCE_REF_KEY in posting.meta
+        if SOURCE_REF_KEY not in posting.meta:
+            return False
+        from ..matching import is_unknown_account
+        return not is_unknown_account(posting.account)
 
     def _make_transaction(
         self,
@@ -1379,8 +1382,10 @@ class RevolutSource(Source):
                 for posting in entry.postings:
                     if posting.meta is None:
                         continue
+                    if posting.account not in all_accounts:
+                        continue
                     ref = posting.meta.get(SOURCE_REF_KEY)
-                    if ref is not None and ref.startswith('revolut:'):
+                    if ref is not None:
                         matched_ids.setdefault(ref, []).append((entry, posting))
 
         # Track for balance assertions
@@ -1404,30 +1409,11 @@ class RevolutSource(Source):
             tgt_existing = matched_ids.get(tgt_id)
             
             if src_existing is not None or tgt_existing is not None:
-                # Only skip if at least one match is on a properly-owned account
-                src_properly_matched = src_existing is not None and any(
-                    posting.account in all_accounts for _, posting in src_existing)
-                tgt_properly_matched = tgt_existing is not None and any(
-                    posting.account in all_accounts for _, posting in tgt_existing)
-                if src_properly_matched or tgt_properly_matched:
-                    for existing in [src_existing, tgt_existing]:
-                        if existing is not None and len(existing) > 1:
-                            results.add_invalid_reference(
-                                InvalidSourceReference(len(existing) - 1, existing))
-                else:
-                    # source_ref on FIXME only — regenerate
-                    src_account_id = f"{pair.source_statement.account_type}_{pair.source_txn.currency}"
-                    tgt_account_id = f"{pair.target_statement.account_type}_{pair.target_txn.currency}"
-                    source_account = self._get_account_for_id(src_account_id)
-                    target_account = self._get_account_for_id(tgt_account_id)
-                    if source_account is not None and target_account is not None:
-                        beancount_txn = self._make_fx_transaction(pair, source_account, target_account)
-                        results.add_pending_entry(
-                            ImportResult(
-                                date=pair.date,
-                                entries=[beancount_txn],
-                                info=get_info(pair.source_statement.filename),
-                            ))
+                # Already in journal — validate
+                for existing in [src_existing, tgt_existing]:
+                    if existing is not None and len(existing) > 1:
+                        results.add_invalid_reference(
+                            InvalidSourceReference(len(existing) - 1, existing))
             else:
                 # Create combined FX transaction
                 src_account_id = f"{pair.source_statement.account_type}_{pair.source_txn.currency}"
@@ -1470,33 +1456,26 @@ class RevolutSource(Source):
 
             existing = matched_ids.get(txn_id)
             if existing is not None:
-                properly_matched = any(
-                    posting.account in all_accounts
-                    for _, posting in existing
-                )
-                if properly_matched:
-                    if len(existing) > 1:
-                        results.add_invalid_reference(
-                            InvalidSourceReference(len(existing) - 1, existing))
+                if len(existing) > 1:
+                    results.add_invalid_reference(
+                        InvalidSourceReference(len(existing) - 1, existing))
+            else:
+                target_account = self._get_account_for_id(account_id)
+                if target_account is None:
                     continue
-                # source_ref on FIXME only — fall through to generate
-
-            target_account = self._get_account_for_id(account_id)
-            if target_account is None:
-                continue
+                    
+                beancount_txn = self._make_transaction(statement, txn, target_account)
+                results.add_pending_entry(
+                    ImportResult(
+                        date=txn.completed_date or txn.started_date,
+                        entries=[beancount_txn],
+                        info=get_info(statement.filename),
+                    ))
                 
-            beancount_txn = self._make_transaction(statement, txn, target_account)
-            results.add_pending_entry(
-                ImportResult(
-                    date=txn.completed_date or txn.started_date,
-                    entries=[beancount_txn],
-                    info=get_info(statement.filename),
-                ))
-            
-            # Track balance
-            balances_by_account.setdefault(target_account, []).append(
-                (txn.completed_date or txn.started_date, txn.balance_after, txn.currency, statement.filename)
-            )
+                # Track balance
+                balances_by_account.setdefault(target_account, []).append(
+                    (txn.completed_date or txn.started_date, txn.balance_after, txn.currency, statement.filename)
+                )
 
         # Generate balance assertions
         for account, balances in balances_by_account.items():

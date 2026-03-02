@@ -526,7 +526,10 @@ class EnableBankingSource(Source):
         """Check if a posting is cleared."""
         if posting.meta is None:
             return False
-        return SOURCE_REF_KEY in posting.meta
+        if SOURCE_REF_KEY not in posting.meta:
+            return False
+        from ..matching import is_unknown_account
+        return not is_unknown_account(posting.account)
 
     def prepare(
         self,
@@ -544,8 +547,10 @@ class EnableBankingSource(Source):
                 for posting in entry.postings:
                     if posting.meta is None:
                         continue
+                    if posting.account not in all_accounts:
+                        continue
                     ref = posting.meta.get(SOURCE_REF_KEY)
-                    if ref is not None and ref.startswith('eb_'):
+                    if ref is not None:
                         matched_ids.setdefault(ref, []).append((entry, posting))
 
         # Group transactions by account for balance assertions
@@ -559,29 +564,22 @@ class EnableBankingSource(Source):
 
             existing = matched_ids.get(txn_id)
             if existing is not None:
-                properly_matched = any(
-                    posting.account in all_accounts
-                    for _, posting in existing
-                )
-                if properly_matched:
-                    if len(existing) > 1:
-                        results.add_invalid_reference(
-                            InvalidSourceReference(len(existing) - 1, existing))
+                if len(existing) > 1:
+                    results.add_invalid_reference(
+                        InvalidSourceReference(len(existing) - 1, existing))
+            else:
+                # Create new transaction
+                target_account = self._get_account_for_id(txn.account_id)
+                # Skip if account is not mapped and no default_account
+                if target_account is None:
                     continue
-                # source_ref on FIXME only — fall through to generate
-
-            # Create new transaction
-            target_account = self._get_account_for_id(txn.account_id)
-            # Skip if account is not mapped and no default_account
-            if target_account is None:
-                continue
-            beancount_txn = self._make_transaction(txn, target_account)
-            results.add_pending_entry(
-                ImportResult(
-                    date=txn.booking_date,
-                    entries=[beancount_txn],
-                    info=get_info(txn),
-                ))
+                beancount_txn = self._make_transaction(txn, target_account)
+                results.add_pending_entry(
+                    ImportResult(
+                        date=txn.booking_date,
+                        entries=[beancount_txn],
+                        info=get_info(txn),
+                    ))
             
             # Track for balance assertions (only for mapped accounts)
             target_account = self._get_account_for_id(txn.account_id)

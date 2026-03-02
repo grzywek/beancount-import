@@ -2268,17 +2268,17 @@ class VelobankSource(Source):
     def is_posting_cleared(self, posting: Posting) -> bool:
         """Check if a posting is cleared.
 
-        A posting is cleared if it has the velobank_statement metadata.
-
-        Args:
-            posting: The posting to check.
-
-        Returns:
-            True if the posting is cleared.
+        A posting is cleared if it has source_ref metadata AND is on a
+        proper (non-FIXME) account.  Postings on FIXME accounts are not
+        considered cleared so the matching algorithm can merge them with
+        the source's pending entry that has the correct account.
         """
         if posting.meta is None:
             return False
-        return SOURCE_REF_KEY in posting.meta
+        if SOURCE_REF_KEY not in posting.meta:
+            return False
+        from ..matching import is_unknown_account
+        return not is_unknown_account(posting.account)
 
     def _get_account_for_iban(self, iban: str) -> str:
         """Get the Beancount account for a given IBAN.
@@ -2322,8 +2322,10 @@ class VelobankSource(Source):
                 for posting in entry.postings:
                     if posting.meta is None:
                         continue
+                    if posting.account not in all_accounts:
+                        continue
                     stmt_ref = posting.meta.get(SOURCE_REF_KEY)
-                    if stmt_ref is not None and stmt_ref.startswith('velobank:'):
+                    if stmt_ref is not None:
                         matched_ids.setdefault(stmt_ref, []).append((entry, posting))
 
         # Process all transactions from all statements
@@ -2338,27 +2340,18 @@ class VelobankSource(Source):
 
                 existing = matched_ids.get(txn_id)
                 if existing is not None:
-                    # Only skip if source_ref is on a properly-owned account
-                    properly_matched = any(
-                        posting.account in all_accounts
-                        for _, posting in existing
-                    )
-                    if properly_matched:
-                        if len(existing) > 1:
-                            results.add_invalid_reference(
-                                InvalidSourceReference(len(existing) - 1, existing))
-                        continue
-                    # source_ref found only on FIXME accounts — still generate
-                    # pending entry so user gets proper account suggestions
-
-                # Create new transaction with proper account and account_iban
-                beancount_txn = self._make_transaction(txn, target_account, statement.account_iban)
-                results.add_pending_entry(
-                    ImportResult(
-                        date=txn.booking_date,
-                        entries=[beancount_txn],
-                        info=get_info(txn),
-                    ))
+                    if len(existing) > 1:
+                        results.add_invalid_reference(
+                            InvalidSourceReference(len(existing) - 1, existing))
+                else:
+                    # Create new transaction with proper account and account_iban
+                    beancount_txn = self._make_transaction(txn, target_account, statement.account_iban)
+                    results.add_pending_entry(
+                        ImportResult(
+                            date=txn.booking_date,
+                            entries=[beancount_txn],
+                            info=get_info(txn),
+                        ))
 
             # Add balance assertion for statement end
             if statement.transactions:
