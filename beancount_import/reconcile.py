@@ -668,7 +668,14 @@ class LoadedReconciler(object):
                 if any(
                         is_unknown_account(posting.account)
                         for posting in entry.postings):
-                    output.append(entry)
+                    # Skip entries that have source_ref — these are already
+                    # handled by a source's prepare() which generates a pending
+                    # entry with proper accounts.
+                    has_source_ref = any(
+                        posting.meta and posting.meta.get('source_ref')
+                        for posting in entry.postings)
+                    if not has_source_ref:
+                        output.append(entry)
         return output
 
     def _add_uncleared_postings_from(self,
