@@ -3073,75 +3073,82 @@ class Trading212Source(DescriptionBasedSource):
         }
         
         # =====================================================================
-        # Section 2: Cash Flow Calculation (CSV-first)
+        # Section 2: Cash Flow Calculation (per-currency)
         # =====================================================================
         
-        # Use CSV data for calculations when available
+        # Build per-currency cash flow breakdown
+        per_currency_flows: Dict[str, Dict[str, Decimal]] = {}
+        
+        def add_flow(currency: str, category: str, amount: Decimal) -> None:
+            if currency not in per_currency_flows:
+                per_currency_flows[currency] = {
+                    "deposits": D(0),
+                    "withdrawals": D(0),
+                    "buy_cost": D(0),
+                    "sell_proceeds": D(0),
+                    "dividends": D(0),
+                    "lending_interest": D(0),
+                    "cash_interest": D(0),
+                    "adjustments": D(0),
+                    "fees": D(0),
+                    "conversion_in": D(0),
+                    "conversion_out": D(0),
+                }
+            per_currency_flows[currency][category] += amount
+        
         if self._csv_transactions:
-            # Determine the account's base currency from account summary
-            base_currency = self._account_summary.currency if self._account_summary else "USD"
+            for t in csv_deposits:
+                add_flow(t.currency, "deposits", t.total)
+            for t in csv_withdrawals:
+                add_flow(t.currency, "withdrawals", abs(t.total))
+            for t in csv_buy_orders:
+                add_flow(t.currency, "buy_cost", abs(t.total))
+            for t in csv_sell_orders:
+                add_flow(t.currency, "sell_proceeds", abs(t.total))
+            for t in csv_dividends:
+                add_flow(t.currency, "dividends", t.total)
+            for t in csv_lending_interest:
+                add_flow(t.currency, "lending_interest", t.total)
+            for t in csv_cash_interest:
+                add_flow(t.currency, "cash_interest", t.total)
+            for t in csv_adjustments:
+                add_flow(t.currency, "adjustments", t.total)
+            for t in csv_adr_fees:
+                add_flow(t.currency, "fees", abs(t.total))
             
-            # Only count deposits/withdrawals in the base currency for cash flow.
-            # Non-base-currency deposits are captured via currency conversion to_amount.
-            base_deposits = [t for t in csv_deposits if t.currency == base_currency]
-            base_withdrawals = [t for t in csv_withdrawals if t.currency == base_currency]
-            
-            total_deposits = sum(t.total for t in base_deposits)
-            total_withdrawals = sum(abs(t.total) for t in base_withdrawals)
-            total_dividends = sum(t.total for t in csv_dividends)
-            total_lending = sum(t.total for t in csv_lending_interest)
-            total_cash_interest = sum(t.total for t in csv_cash_interest)
-            total_adjustments = sum(t.total for t in csv_adjustments)
-            
-            # Calculate buy/sell totals from CSV
-            total_buy_cost = sum(abs(t.total) for t in csv_buy_orders)
-            total_sell_proceeds = sum(abs(t.total) for t in csv_sell_orders)
-            
-            # ADR fees are separate entries that reduce cash balance
-            # Other fees are already embedded in transaction totals
-            total_fees = sum(abs(t.total) for t in csv_adr_fees)
-            
-            # Currency conversions: the to_amount in base currency is an inflow,
-            # and the conversion fee reduces cash
-            total_conversion_inflow = sum(
-                t.conversion_to_amount for t in csv_currency_conversions
-                if t.conversion_to_amount and t.conversion_to_currency == base_currency
-            )
-            total_conversion_fees = sum(
-                abs(t.conversion_fee) for t in csv_currency_conversions
-                if t.conversion_fee
-            )
-            total_fees += total_conversion_fees
-        else:
-            # No CSV data available - this is now an error condition
-            print("[Trading212] Warning: No CSV exports found - unable to calculate cash flow", flush=True)
-            total_deposits = D(0)
-            total_withdrawals = D(0)
-            total_fees = D(0)
-            total_dividends = D(0)
-            total_lending = D(0)
-            total_cash_interest = D(0)
-            total_adjustments = D(0)
-            total_buy_cost = D(0)
-            total_sell_proceeds = D(0)
-            total_conversion_inflow = D(0)
-            total_conversion_fees = D(0)
+            # Currency conversions: from_amount goes out of from_currency,
+            # to_amount comes into to_currency, fee charged in fee_currency
+            for t in csv_currency_conversions:
+                if t.conversion_from_amount and t.conversion_from_currency:
+                    add_flow(t.conversion_from_currency, "conversion_out", t.conversion_from_amount)
+                if t.conversion_to_amount and t.conversion_to_currency:
+                    add_flow(t.conversion_to_currency, "conversion_in", t.conversion_to_amount)
+                if t.conversion_fee and t.conversion_fee_currency:
+                    add_flow(t.conversion_fee_currency, "fees", abs(t.conversion_fee))
         
-        # Expected cash balance calculation
-        expected_cash = (
-            total_deposits 
-            - total_withdrawals 
-            - total_fees 
-            + total_dividends 
-            + total_lending 
-            + total_cash_interest
-            + total_adjustments
-            - total_buy_cost 
-            + total_sell_proceeds
-            + total_conversion_inflow
-        )
+        # Calculate expected balance per currency
+        cash_flow_per_currency = {}
+        for currency, flows in sorted(per_currency_flows.items()):
+            expected = (
+                flows["deposits"]
+                - flows["withdrawals"]
+                - flows["buy_cost"]
+                + flows["sell_proceeds"]
+                + flows["dividends"]
+                + flows["lending_interest"]
+                + flows["cash_interest"]
+                + flows["adjustments"]
+                - flows["fees"]
+                + flows["conversion_in"]
+                - flows["conversion_out"]
+            )
+            cash_flow_per_currency[currency] = {
+                **{k: str(v) for k, v in flows.items()},
+                "expected_balance": str(expected),
+            }
         
-        # Get actual cash from API
+        # Get actual cash from API (base currency only)
+        base_currency = self._account_summary.currency if self._account_summary else "USD"
         actual_cash = D(0)
         if self._account_summary:
             actual_cash = (
@@ -3150,35 +3157,31 @@ class Trading212Source(DescriptionBasedSource):
                 + self._account_summary.cash_reserved
             )
         
-        cash_difference = actual_cash - expected_cash
+        # Add actual vs expected comparison for base currency
+        if base_currency in cash_flow_per_currency:
+            expected_base = D(cash_flow_per_currency[base_currency]["expected_balance"])
+            cash_difference = actual_cash - expected_base
+            cash_flow_per_currency[base_currency]["actual_balance"] = str(actual_cash)
+            cash_flow_per_currency[base_currency]["difference"] = str(cash_difference)
+        else:
+            expected_base = D(0)
+            cash_difference = actual_cash
         
         report["cash_flow"] = {
             "data_source": "CSV" if self._csv_transactions else "JSON",
-            "deposits": str(total_deposits),
-            "withdrawals": str(total_withdrawals),
-            "fees": str(total_fees),
-            "dividends": str(total_dividends),
-            "lending_interest": str(total_lending),
-            "cash_interest": str(total_cash_interest),
-            "adjustments": str(total_adjustments) if self._csv_transactions else "N/A",
-            "buy_cost": str(total_buy_cost),
-            "sell_proceeds": str(total_sell_proceeds),
-            "currency_conversion_inflow": str(total_conversion_inflow),
-            "currency_conversion_fees": str(total_conversion_fees),
-            "expected_cash": str(expected_cash),
-            "actual_cash": str(actual_cash),
-            "difference": str(cash_difference),
-            "currency": self._account_summary.currency if self._account_summary else "EUR",
+            "base_currency": base_currency,
+            "per_currency": cash_flow_per_currency,
         }
         
         # Add discrepancy if significant
         if abs(cash_difference) > D("0.01"):
             report["discrepancies"].append({
                 "type": "cash_balance",
-                "expected": str(expected_cash),
+                "currency": base_currency,
+                "expected": str(expected_base),
                 "actual": str(actual_cash),
                 "difference": str(cash_difference),
-                "note": "Difference may be due to FX rates, timing, or missing transactions",
+                "note": "Difference may be due to missing transactions or rounding",
             })
         
         # =====================================================================
@@ -3412,7 +3415,16 @@ class Trading212Source(DescriptionBasedSource):
         print(f"  Orders: Buy: {buy_orders}, Sell: {sell_orders}", flush=True)
         print(f"  Dividends: {dividends}", flush=True)
         print(f"  Positions: {report['summary']['positions']}", flush=True)
-        print(f"  Cash - Expected: {expected_cash:.2f}, Actual: {actual_cash:.2f}, Diff: {cash_difference:.2f}", flush=True)
+        
+        # Print per-currency cash flow
+        for currency, flows in sorted(cash_flow_per_currency.items()):
+            expected = flows["expected_balance"]
+            actual = flows.get("actual_balance", "N/A")
+            diff = flows.get("difference", "N/A")
+            if actual != "N/A":
+                print(f"  Cash [{currency}] - Expected: {D(expected):.2f}, Actual: {D(actual):.2f}, Diff: {D(diff):.2f}", flush=True)
+            else:
+                print(f"  Cash [{currency}] - Expected: {D(expected):.2f}", flush=True)
         
         if report["discrepancies"]:
             print(f"  ⚠️  {len(report['discrepancies'])} discrepancies found - check report for details", flush=True)
