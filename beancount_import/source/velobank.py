@@ -2338,18 +2338,27 @@ class VelobankSource(Source):
 
                 existing = matched_ids.get(txn_id)
                 if existing is not None:
-                    if len(existing) > 1:
-                        results.add_invalid_reference(
-                            InvalidSourceReference(len(existing) - 1, existing))
-                else:
-                    # Create new transaction with proper account and account_iban
-                    beancount_txn = self._make_transaction(txn, target_account, statement.account_iban)
-                    results.add_pending_entry(
-                        ImportResult(
-                            date=txn.booking_date,
-                            entries=[beancount_txn],
-                            info=get_info(txn),
-                        ))
+                    # Only skip if source_ref is on a properly-owned account
+                    properly_matched = any(
+                        posting.account in all_accounts
+                        for _, posting in existing
+                    )
+                    if properly_matched:
+                        if len(existing) > 1:
+                            results.add_invalid_reference(
+                                InvalidSourceReference(len(existing) - 1, existing))
+                        continue
+                    # source_ref found only on FIXME accounts — still generate
+                    # pending entry so user gets proper account suggestions
+
+                # Create new transaction with proper account and account_iban
+                beancount_txn = self._make_transaction(txn, target_account, statement.account_iban)
+                results.add_pending_entry(
+                    ImportResult(
+                        date=txn.booking_date,
+                        entries=[beancount_txn],
+                        info=get_info(txn),
+                    ))
 
             # Add balance assertion for statement end
             if statement.transactions:

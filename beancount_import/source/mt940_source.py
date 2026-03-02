@@ -769,18 +769,25 @@ class Mt940Source(Source):
             
             existing = matched_ids.get(txn_id)
             if existing is not None:
-                if len(existing) > 1:
-                    results.add_invalid_reference(
-                        InvalidSourceReference(len(existing) - 1, existing))
-            else:
-                # Create new transaction
-                beancount_txn = self._make_transaction(stmt, txn, account, bank)
-                results.add_pending_entry(
-                    ImportResult(
-                        date=txn.value_date,
-                        entries=[beancount_txn],
-                        info=get_info(stmt.filename),
-                    ))
+                properly_matched = any(
+                    posting.account in all_accounts
+                    for _, posting in existing
+                )
+                if properly_matched:
+                    if len(existing) > 1:
+                        results.add_invalid_reference(
+                            InvalidSourceReference(len(existing) - 1, existing))
+                    continue
+                # source_ref on FIXME only — fall through to generate
+
+            # Create new transaction
+            beancount_txn = self._make_transaction(stmt, txn, account, bank)
+            results.add_pending_entry(
+                ImportResult(
+                    date=txn.value_date,
+                    entries=[beancount_txn],
+                    info=get_info(stmt.filename),
+                ))
             
             # Track latest balance for this account
             balances_by_account[account] = (stmt.closing_date, stmt.closing_balance, stmt.currency)

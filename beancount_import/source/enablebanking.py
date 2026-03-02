@@ -559,22 +559,29 @@ class EnableBankingSource(Source):
 
             existing = matched_ids.get(txn_id)
             if existing is not None:
-                if len(existing) > 1:
-                    results.add_invalid_reference(
-                        InvalidSourceReference(len(existing) - 1, existing))
-            else:
-                # Create new transaction
-                target_account = self._get_account_for_id(txn.account_id)
-                # Skip if account is not mapped and no default_account
-                if target_account is None:
+                properly_matched = any(
+                    posting.account in all_accounts
+                    for _, posting in existing
+                )
+                if properly_matched:
+                    if len(existing) > 1:
+                        results.add_invalid_reference(
+                            InvalidSourceReference(len(existing) - 1, existing))
                     continue
-                beancount_txn = self._make_transaction(txn, target_account)
-                results.add_pending_entry(
-                    ImportResult(
-                        date=txn.booking_date,
-                        entries=[beancount_txn],
-                        info=get_info(txn),
-                    ))
+                # source_ref on FIXME only — fall through to generate
+
+            # Create new transaction
+            target_account = self._get_account_for_id(txn.account_id)
+            # Skip if account is not mapped and no default_account
+            if target_account is None:
+                continue
+            beancount_txn = self._make_transaction(txn, target_account)
+            results.add_pending_entry(
+                ImportResult(
+                    date=txn.booking_date,
+                    entries=[beancount_txn],
+                    info=get_info(txn),
+                ))
             
             # Track for balance assertions (only for mapped accounts)
             target_account = self._get_account_for_id(txn.account_id)

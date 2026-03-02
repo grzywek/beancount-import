@@ -1404,11 +1404,30 @@ class RevolutSource(Source):
             tgt_existing = matched_ids.get(tgt_id)
             
             if src_existing is not None or tgt_existing is not None:
-                # Already in journal — validate
-                for existing in [src_existing, tgt_existing]:
-                    if existing is not None and len(existing) > 1:
-                        results.add_invalid_reference(
-                            InvalidSourceReference(len(existing) - 1, existing))
+                # Only skip if at least one match is on a properly-owned account
+                src_properly_matched = src_existing is not None and any(
+                    posting.account in all_accounts for _, posting in src_existing)
+                tgt_properly_matched = tgt_existing is not None and any(
+                    posting.account in all_accounts for _, posting in tgt_existing)
+                if src_properly_matched or tgt_properly_matched:
+                    for existing in [src_existing, tgt_existing]:
+                        if existing is not None and len(existing) > 1:
+                            results.add_invalid_reference(
+                                InvalidSourceReference(len(existing) - 1, existing))
+                else:
+                    # source_ref on FIXME only — regenerate
+                    src_account_id = f"{pair.source_statement.account_type}_{pair.source_txn.currency}"
+                    tgt_account_id = f"{pair.target_statement.account_type}_{pair.target_txn.currency}"
+                    source_account = self._get_account_for_id(src_account_id)
+                    target_account = self._get_account_for_id(tgt_account_id)
+                    if source_account is not None and target_account is not None:
+                        beancount_txn = self._make_fx_transaction(pair, source_account, target_account)
+                        results.add_pending_entry(
+                            ImportResult(
+                                date=pair.date,
+                                entries=[beancount_txn],
+                                info=get_info(pair.source_statement.filename),
+                            ))
             else:
                 # Create combined FX transaction
                 src_account_id = f"{pair.source_statement.account_type}_{pair.source_txn.currency}"
@@ -1451,26 +1470,33 @@ class RevolutSource(Source):
 
             existing = matched_ids.get(txn_id)
             if existing is not None:
-                if len(existing) > 1:
-                    results.add_invalid_reference(
-                        InvalidSourceReference(len(existing) - 1, existing))
-            else:
-                target_account = self._get_account_for_id(account_id)
-                if target_account is None:
-                    continue
-                    
-                beancount_txn = self._make_transaction(statement, txn, target_account)
-                results.add_pending_entry(
-                    ImportResult(
-                        date=txn.completed_date or txn.started_date,
-                        entries=[beancount_txn],
-                        info=get_info(statement.filename),
-                    ))
-                
-                # Track balance
-                balances_by_account.setdefault(target_account, []).append(
-                    (txn.completed_date or txn.started_date, txn.balance_after, txn.currency, statement.filename)
+                properly_matched = any(
+                    posting.account in all_accounts
+                    for _, posting in existing
                 )
+                if properly_matched:
+                    if len(existing) > 1:
+                        results.add_invalid_reference(
+                            InvalidSourceReference(len(existing) - 1, existing))
+                    continue
+                # source_ref on FIXME only — fall through to generate
+
+            target_account = self._get_account_for_id(account_id)
+            if target_account is None:
+                continue
+                
+            beancount_txn = self._make_transaction(statement, txn, target_account)
+            results.add_pending_entry(
+                ImportResult(
+                    date=txn.completed_date or txn.started_date,
+                    entries=[beancount_txn],
+                    info=get_info(statement.filename),
+                ))
+            
+            # Track balance
+            balances_by_account.setdefault(target_account, []).append(
+                (txn.completed_date or txn.started_date, txn.balance_after, txn.currency, statement.filename)
+            )
 
         # Generate balance assertions
         for account, balances in balances_by_account.items():
