@@ -907,6 +907,7 @@ class ZenSource(Source):
             (TRANSACTION_TYPE_KEY, 'Exchange money'),
             (CURRENCY_RATE_KEY, str(src_txn.currency_rate)),
             (SOURCE_DOC_KEY, os.path.basename(pair.source_statement.filename)),
+            ('transaction_date', str(src_txn.date)),
         ])
         
         # Build metadata for target posting  
@@ -916,6 +917,7 @@ class ZenSource(Source):
             (ACCOUNT_IBAN_KEY, pair.target_statement.iban),
             (TRANSACTION_TYPE_KEY, 'Exchange money'),
             (SOURCE_DOC_KEY, os.path.basename(pair.target_statement.filename)),
+            ('transaction_date', str(tgt_txn.date)),
         ])
         
         # Build narration: "FX - PLN → EUR" or "FX reversal - PLN → EUR"
@@ -1014,6 +1016,9 @@ class ZenSource(Source):
         
         # Add link to source document (only filename, not full path)
         meta[SOURCE_DOC_KEY] = os.path.basename(statement.filename)
+        
+        # Add transaction date from CSV
+        meta['transaction_date'] = str(txn.date)
 
         # Determine payee and narration
         payee = txn.counterparty or 'Zen'

@@ -802,6 +802,16 @@ def get_info(filename: str) -> dict:
     )
 
 
+@dataclass
+class RevolutFxPair:
+    """Paired FX exchange transactions from Revolut."""
+    date: datetime.date
+    source_statement: CsvStatementInfo  # Debit side (e.g., PLN)
+    source_txn: RevolutTransaction
+    target_statement: CsvStatementInfo  # Credit side (e.g., USD)
+    target_txn: RevolutTransaction
+
+
 class RevolutSource(Source):
     """Revolut CSV/PDF transaction source."""
 
@@ -1116,12 +1126,12 @@ class RevolutSource(Source):
         if txn.completed_date_raw:
             meta['completed_date'] = txn.completed_date_raw
         
-        # Link to source document(s)
-        meta[SOURCE_DOC_KEY] = os.path.basename(statement.filename)
-        
-        # Add PDF as document_2 if transaction has PDF enrichment
+        # Link to source document(s) — PDF is primary, CSV is secondary
         if txn.pdf_filename:
-            meta['document_2'] = txn.pdf_filename
+            meta[SOURCE_DOC_KEY] = txn.pdf_filename
+            meta['document_2'] = os.path.basename(statement.filename)
+        else:
+            meta[SOURCE_DOC_KEY] = os.path.basename(statement.filename)
         
         # Create postings
         units = Amount(txn.amount, txn.currency)
@@ -1198,6 +1208,161 @@ class RevolutSource(Source):
             postings=[posting, fixme_posting],
         )
 
+    def _find_fx_pairs(self) -> Tuple[List[RevolutFxPair], Set[str]]:
+        """Find matching FX exchange transaction pairs.
+        
+        Revolut creates two CSV entries for currency exchanges:
+        - Source side: debit (negative amount) with original_amount/original_currency
+        - Target side: credit (positive amount) in target currency
+        
+        Match by: same started_date, type "Exchange", opposite signs,
+        and source.original_amount == target.amount.
+        
+        Returns:
+            Tuple of:
+            - List of matched FxPair objects
+            - Set of transaction IDs that were paired (to skip in individual processing)
+        """
+        pairs: List[RevolutFxPair] = []
+        paired_ids: Set[str] = set()
+        
+        # Collect all Exchange transactions
+        exchange_txns: List[Tuple[CsvStatementInfo, RevolutTransaction, str]] = []
+        for statement, txn in self.transactions:
+            if txn.transaction_type == 'Exchange':
+                account_id = f"{statement.account_type}_{txn.currency}"
+                txn_id = _generate_transaction_id(statement.account_type, txn.currency, txn)
+                exchange_txns.append((statement, txn, txn_id))
+        
+        # Group by started_date for efficient matching
+        by_date: Dict[datetime.date, List[Tuple[CsvStatementInfo, RevolutTransaction, str]]] = {}
+        for stmt, txn, txn_id in exchange_txns:
+            by_date.setdefault(txn.started_date, []).append((stmt, txn, txn_id))
+        
+        matched_ids: Set[str] = set()
+        
+        for date, group in by_date.items():
+            # Split into sources (negative - selling currency) and targets (positive - buying currency)
+            sources = [(s, t, tid) for s, t, tid in group if t.amount < ZERO]
+            targets = [(s, t, tid) for s, t, tid in group if t.amount > ZERO]
+            
+            for src_stmt, src_txn, src_id in sources:
+                if src_id in matched_ids:
+                    continue
+                
+                for tgt_stmt, tgt_txn, tgt_id in targets:
+                    if tgt_id in matched_ids:
+                        continue
+                    
+                    # Must be different currencies
+                    if src_txn.currency == tgt_txn.currency:
+                        continue
+                    
+                    # Match: source has original_amount matching target amount
+                    # e.g., source PLN: original_amount=142.92 USD, target USD: amount=142.92
+                    if (src_txn.original_amount is not None and 
+                        src_txn.original_currency is not None):
+                        try:
+                            src_orig = Decimal(src_txn.original_amount)
+                            if (abs(src_orig) == abs(tgt_txn.amount) and
+                                src_txn.original_currency == tgt_txn.currency):
+                                pair = RevolutFxPair(
+                                    date=tgt_txn.completed_date or tgt_txn.started_date,
+                                    source_statement=src_stmt,
+                                    source_txn=src_txn,
+                                    target_statement=tgt_stmt,
+                                    target_txn=tgt_txn,
+                                )
+                                pairs.append(pair)
+                                matched_ids.add(src_id)
+                                matched_ids.add(tgt_id)
+                                break
+                        except (ValueError, InvalidOperation):
+                            continue
+        
+        return pairs, matched_ids
+
+    def _make_fx_transaction(
+        self,
+        pair: RevolutFxPair,
+        source_account: str,
+        target_account: str,
+    ) -> Transaction:
+        """Create a combined FX transaction from a matched pair."""
+        src_txn = pair.source_txn
+        tgt_txn = pair.target_txn
+        
+        # Narration: "Exchanged PLN to USD"
+        src_currency = src_txn.currency
+        tgt_currency = tgt_txn.currency
+        narration = f"Exchanged {src_currency} to {tgt_currency}"
+        
+        # Compute exchange rate: how much source per unit of target
+        # e.g., 505.00 PLN / 142.92 USD = 3.5334 PLN/USD
+        try:
+            unit_price = Amount(
+                abs(src_txn.amount / tgt_txn.amount).quantize(Decimal('0.0001')),
+                src_currency,
+            )
+        except (ZeroDivisionError, InvalidOperation):
+            unit_price = None
+        
+        # Source posting metadata
+        src_meta = collections.OrderedDict()
+        src_meta[SOURCE_REF_KEY] = _generate_transaction_id(
+            pair.source_statement.account_type, src_txn.currency, src_txn)
+        src_meta[SOURCE_BANK_KEY] = 'Revolut'
+        
+        # Target posting metadata  
+        tgt_meta = collections.OrderedDict()
+        tgt_meta[SOURCE_REF_KEY] = _generate_transaction_id(
+            pair.target_statement.account_type, tgt_txn.currency, tgt_txn)
+        tgt_meta[SOURCE_BANK_KEY] = 'Revolut'
+        
+        # Add common metadata to source posting
+        if src_txn.started_date_raw:
+            src_meta['started_date'] = src_txn.started_date_raw
+        if src_txn.completed_date_raw:
+            src_meta['completed_date'] = src_txn.completed_date_raw
+        
+        # Document metadata on source posting
+        if src_txn.pdf_filename:
+            src_meta[SOURCE_DOC_KEY] = src_txn.pdf_filename
+            src_meta['document_2'] = os.path.basename(pair.source_statement.filename)
+        else:
+            src_meta[SOURCE_DOC_KEY] = os.path.basename(pair.source_statement.filename)
+        
+        return Transaction(
+            meta=collections.OrderedDict([
+                ('filename', pair.source_statement.filename),
+                ('lineno', src_txn.line_number),
+            ]),
+            date=pair.date,
+            flag=FLAG_OKAY,
+            payee='Revolut',
+            narration=narration,
+            tags=EMPTY_SET,
+            links=EMPTY_SET,
+            postings=[
+                Posting(
+                    account=source_account,
+                    units=Amount(src_txn.amount, src_currency),
+                    cost=None,
+                    price=None,
+                    flag=None,
+                    meta=src_meta,
+                ),
+                Posting(
+                    account=target_account,
+                    units=Amount(tgt_txn.amount, tgt_currency),
+                    cost=None,
+                    price=unit_price,
+                    flag=None,
+                    meta=tgt_meta,
+                ),
+            ],
+        )
+
     def prepare(
         self,
         journal: JournalEditor,
@@ -1225,11 +1390,66 @@ class RevolutSource(Source):
         
         valid_ids = set()
 
-        # Process all transactions
+        # Find and process FX pairs first
+        fx_pairs, fx_paired_ids = self._find_fx_pairs()
+        
+        for pair in fx_pairs:
+            src_id = _generate_transaction_id(
+                pair.source_statement.account_type, pair.source_txn.currency, pair.source_txn)
+            tgt_id = _generate_transaction_id(
+                pair.target_statement.account_type, pair.target_txn.currency, pair.target_txn)
+            valid_ids.add(src_id)
+            valid_ids.add(tgt_id)
+            
+            # Check if already matched in journal (either side)
+            src_existing = matched_ids.get(src_id)
+            tgt_existing = matched_ids.get(tgt_id)
+            
+            if src_existing is not None or tgt_existing is not None:
+                # Already in journal — validate
+                for existing in [src_existing, tgt_existing]:
+                    if existing is not None and len(existing) > 1:
+                        results.add_invalid_reference(
+                            InvalidSourceReference(len(existing) - 1, existing))
+            else:
+                # Create combined FX transaction
+                src_account_id = f"{pair.source_statement.account_type}_{pair.source_txn.currency}"
+                tgt_account_id = f"{pair.target_statement.account_type}_{pair.target_txn.currency}"
+                source_account = self._get_account_for_id(src_account_id)
+                target_account = self._get_account_for_id(tgt_account_id)
+                
+                if source_account is None or target_account is None:
+                    continue
+                
+                beancount_txn = self._make_fx_transaction(pair, source_account, target_account)
+                results.add_pending_entry(
+                    ImportResult(
+                        date=pair.date,
+                        entries=[beancount_txn],
+                        info=get_info(pair.source_statement.filename),
+                    ))
+                
+                # Track balances for both sides
+                src_txn = pair.source_txn
+                tgt_txn = pair.target_txn
+                balances_by_account.setdefault(source_account, []).append(
+                    (src_txn.completed_date or src_txn.started_date, src_txn.balance_after,
+                     src_txn.currency, pair.source_statement.filename)
+                )
+                balances_by_account.setdefault(target_account, []).append(
+                    (tgt_txn.completed_date or tgt_txn.started_date, tgt_txn.balance_after,
+                     tgt_txn.currency, pair.target_statement.filename)
+                )
+
+        # Process remaining (non-FX-paired) transactions
         for statement, txn in self.transactions:
             account_id = f"{statement.account_type}_{txn.currency}"
             txn_id = _generate_transaction_id(statement.account_type, txn.currency, txn)
             valid_ids.add(txn_id)
+            
+            # Skip transactions already handled as FX pairs
+            if txn_id in fx_paired_ids:
+                continue
 
             existing = matched_ids.get(txn_id)
             if existing is not None:

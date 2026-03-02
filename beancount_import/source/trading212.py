@@ -476,6 +476,13 @@ class CsvTransaction:
     transaction_fee_currency: Optional[str]
     finra_fee: Optional[Decimal]
     finra_fee_currency: Optional[str]
+    # Currency conversion fields
+    conversion_from_amount: Optional[Decimal] = None
+    conversion_from_currency: Optional[str] = None
+    conversion_to_amount: Optional[Decimal] = None
+    conversion_to_currency: Optional[str] = None
+    conversion_fee: Optional[Decimal] = None
+    conversion_fee_currency: Optional[str] = None
     # Source file
     source_file: Optional[str] = None  # CSV filename this transaction came from
 
@@ -545,6 +552,28 @@ class Trading212Source(DescriptionBasedSource):
         self._symbol_registry: Dict[str, List[Tuple[str, str]]] = {}
         # Maps original ticker -> final beancount symbol
         self._ticker_to_beancount_symbol: Dict[str, str] = {}
+
+    def _get_vault_account_for_currency(self, currency: str) -> str:
+        """Get the vault account for a specific currency.
+        
+        Derives the account by replacing the base currency component in the
+        configured cash_vault_account. E.g. for currency='EUR' and config
+        'Assets:Broker:Trading212:USD:Vault' -> 'Assets:Broker:Trading212:EUR:Vault'
+        """
+        base_currency = self._account_summary.currency if self._account_summary else "USD"
+        if currency == base_currency:
+            return self.cash_vault_account
+        return self.cash_vault_account.replace(f":{base_currency}:", f":{currency}:")
+
+    def _get_trade_account_for_currency(self, currency: str) -> str:
+        """Get the trade account for a specific currency.
+        
+        Same logic as _get_vault_account_for_currency but for the trade account.
+        """
+        base_currency = self._account_summary.currency if self._account_summary else "USD"
+        if currency == base_currency:
+            return self.cash_trade_account
+        return self.cash_trade_account.replace(f":{base_currency}:", f":{currency}:")
 
     def _get_data_file_path(self, name: str) -> str:
         """Get path to a data file in the data directory."""
@@ -910,6 +939,13 @@ class Trading212Source(DescriptionBasedSource):
                             transaction_fee_currency=safe_str(row.get("Currency (Transaction fee)")),
                             finra_fee=safe_decimal(row.get("Finra fee", "")),
                             finra_fee_currency=safe_str(row.get("Currency (Finra fee)")),
+                            # Currency conversion fields
+                            conversion_from_amount=safe_decimal(row.get("Currency conversion from amount", "")),
+                            conversion_from_currency=safe_str(row.get("Currency (Currency conversion from amount)")),
+                            conversion_to_amount=safe_decimal(row.get("Currency conversion to amount", "")),
+                            conversion_to_currency=safe_str(row.get("Currency (Currency conversion to amount)")),
+                            conversion_fee=safe_decimal(row.get("Currency conversion fee", "")),
+                            conversion_fee_currency=safe_str(row.get("Currency (Currency conversion fee)")),
                             source_file=csv_path,
                         )
             except Exception as e:
@@ -1637,6 +1673,100 @@ class Trading212Source(DescriptionBasedSource):
             postings=postings,
         )
 
+    def _make_csv_currency_conversion_transaction(self, csv_txn: CsvTransaction) -> Transaction:
+        """Create a beancount transaction for a currency conversion.
+        
+        Currency conversions happen when Trading 212 converts between currencies,
+        e.g. when an EUR deposit is converted to USD. The CSV row contains:
+        - conversion_from_amount / conversion_from_currency (source currency sold)
+        - conversion_to_amount / conversion_to_currency (target currency bought)
+        - conversion_fee / conversion_fee_currency (FX fee)
+        - total = fee amount (same as conversion_fee)
+        
+        Both sides are posted to the vault account (which holds all currencies).
+        """
+        date = csv_txn.time.date()
+        
+        from_amount = csv_txn.conversion_from_amount or D(0)
+        from_currency = csv_txn.conversion_from_currency or csv_txn.currency
+        to_amount = csv_txn.conversion_to_amount or D(0)
+        to_currency = csv_txn.conversion_to_currency or csv_txn.currency
+        fee_amount = abs(csv_txn.conversion_fee) if csv_txn.conversion_fee else D(0)
+        fee_currency = csv_txn.conversion_fee_currency or csv_txn.currency
+        
+        # Build narration from notes or amounts
+        narration = f"Currency Conversion {from_currency} → {to_currency}"
+        
+        meta = {
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+        }
+        
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        meta["transaction_time"] = csv_txn.time.isoformat()
+        if csv_txn.notes:
+            meta["notes"] = csv_txn.notes
+        if csv_txn.exchange_rate is not None:
+            meta["exchange_rate"] = str(csv_txn.exchange_rate)
+        
+        # Clearing metadata for counter-postings
+        source_ref_meta = {SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{csv_txn.transaction_id}"}
+        
+        postings = [
+            # Source currency out of vault (currency-specific account)
+            Posting(
+                account=self._get_vault_account_for_currency(from_currency),
+                units=Amount(-from_amount, from_currency),
+                cost=None,
+                price=None,
+                flag=None,
+                meta={**meta},
+            ),
+            # Target currency into vault (currency-specific account)
+            Posting(
+                account=self._get_vault_account_for_currency(to_currency),
+                units=Amount(to_amount, to_currency),
+                cost=None,
+                price=None,
+                flag=None,
+                meta={**source_ref_meta},
+            ),
+        ]
+        
+        # Fee posting (if any)
+        if fee_amount > 0:
+            postings.append(Posting(
+                account=self.fees_account,
+                units=Amount(fee_amount, fee_currency),
+                cost=None,
+                price=None,
+                flag=None,
+                meta={**source_ref_meta, "fee_type": "currency_conversion_fee"},
+            ))
+        
+        # FX P/L auto-balance
+        postings.append(Posting(
+            account=self.fx_income_account,
+            units=None,  # Auto-balance
+            cost=None,
+            price=None,
+            flag=None,
+            meta=None,
+        ))
+        
+        return Transaction(
+            meta={
+                "filename": "<trading212-csv>",
+                "lineno": 0,
+            },
+            date=date,
+            flag="*",
+            payee="TRADING 212",
+            narration=narration,
+            tags=frozenset(),
+            links=frozenset(),
+            postings=postings,
+        )
+
     def _make_csv_stock_distribution(self, csv_txn: CsvTransaction) -> Transaction:
         """Create a beancount transaction for a stock distribution (corporate action).
         
@@ -2050,7 +2180,7 @@ class Trading212Source(DescriptionBasedSource):
         
         postings = [
             Posting(
-                account=self.cash_vault_account,
+                account=self._get_vault_account_for_currency(csv_txn.currency),
                 units=Amount(csv_txn.total, csv_txn.currency),
                 cost=None,
                 price=None,
@@ -2120,7 +2250,7 @@ class Trading212Source(DescriptionBasedSource):
         
         postings = [
             Posting(
-                account=self.cash_vault_account,
+                account=self._get_vault_account_for_currency(csv_txn.currency),
                 units=Amount(amount, csv_txn.currency),
                 cost=CostSpec(
                     number_per=None,  # FIFO matching
@@ -2621,10 +2751,14 @@ class Trading212Source(DescriptionBasedSource):
                 elif action == "Deposit":
                     txn = self._make_csv_deposit_transaction(csv_txn)
                     txn_type = "trading212_deposit"
+                    # Register currency-specific vault account
+                    account_set.add(self._get_vault_account_for_currency(csv_txn.currency))
                     
                 elif action == "Withdrawal":
                     txn = self._make_csv_withdrawal_transaction(csv_txn)
                     txn_type = "trading212_withdrawal"
+                    # Register currency-specific vault account
+                    account_set.add(self._get_vault_account_for_currency(csv_txn.currency))
                     
                 elif action in {"Lending interest", "Interest on cash"}:
                     txn = self._make_csv_income_transaction(csv_txn)
@@ -2649,6 +2783,15 @@ class Trading212Source(DescriptionBasedSource):
                 elif action == "ADR Fee":
                     txn = self._make_csv_fee_transaction(csv_txn)
                     txn_type = "trading212_fee"
+                    
+                elif action == "Currency conversion":
+                    txn = self._make_csv_currency_conversion_transaction(csv_txn)
+                    txn_type = "trading212_currency_conversion"
+                    # Register currency-specific vault accounts for both sides
+                    if csv_txn.conversion_from_currency:
+                        account_set.add(self._get_vault_account_for_currency(csv_txn.conversion_from_currency))
+                    if csv_txn.conversion_to_currency:
+                        account_set.add(self._get_vault_account_for_currency(csv_txn.conversion_to_currency))
                     
                 else:
                     # Unknown action type - log warning and skip
@@ -2919,6 +3062,7 @@ class Trading212Source(DescriptionBasedSource):
                            if t.action in ("Stock split open", "Stock split close")]
         csv_adjustments = [t for t in (self._csv_transactions or []) if t.action == "Result adjustment"]
         csv_adr_fees = [t for t in (self._csv_transactions or []) if t.action == "ADR Fee"]
+        csv_currency_conversions = [t for t in (self._csv_transactions or []) if t.action == "Currency conversion"]
         
         report["summary"] = {
             "data_source": "CSV",
@@ -2934,8 +3078,16 @@ class Trading212Source(DescriptionBasedSource):
         
         # Use CSV data for calculations when available
         if self._csv_transactions:
-            total_deposits = sum(t.total for t in csv_deposits)
-            total_withdrawals = sum(abs(t.total) for t in csv_withdrawals)
+            # Determine the account's base currency from account summary
+            base_currency = self._account_summary.currency if self._account_summary else "USD"
+            
+            # Only count deposits/withdrawals in the base currency for cash flow.
+            # Non-base-currency deposits are captured via currency conversion to_amount.
+            base_deposits = [t for t in csv_deposits if t.currency == base_currency]
+            base_withdrawals = [t for t in csv_withdrawals if t.currency == base_currency]
+            
+            total_deposits = sum(t.total for t in base_deposits)
+            total_withdrawals = sum(abs(t.total) for t in base_withdrawals)
             total_dividends = sum(t.total for t in csv_dividends)
             total_lending = sum(t.total for t in csv_lending_interest)
             total_cash_interest = sum(t.total for t in csv_cash_interest)
@@ -2948,6 +3100,18 @@ class Trading212Source(DescriptionBasedSource):
             # ADR fees are separate entries that reduce cash balance
             # Other fees are already embedded in transaction totals
             total_fees = sum(abs(t.total) for t in csv_adr_fees)
+            
+            # Currency conversions: the to_amount in base currency is an inflow,
+            # and the conversion fee reduces cash
+            total_conversion_inflow = sum(
+                t.conversion_to_amount for t in csv_currency_conversions
+                if t.conversion_to_amount and t.conversion_to_currency == base_currency
+            )
+            total_conversion_fees = sum(
+                abs(t.conversion_fee) for t in csv_currency_conversions
+                if t.conversion_fee
+            )
+            total_fees += total_conversion_fees
         else:
             # No CSV data available - this is now an error condition
             print("[Trading212] Warning: No CSV exports found - unable to calculate cash flow", flush=True)
@@ -2960,6 +3124,8 @@ class Trading212Source(DescriptionBasedSource):
             total_adjustments = D(0)
             total_buy_cost = D(0)
             total_sell_proceeds = D(0)
+            total_conversion_inflow = D(0)
+            total_conversion_fees = D(0)
         
         # Expected cash balance calculation
         expected_cash = (
@@ -2972,6 +3138,7 @@ class Trading212Source(DescriptionBasedSource):
             + total_adjustments
             - total_buy_cost 
             + total_sell_proceeds
+            + total_conversion_inflow
         )
         
         # Get actual cash from API
@@ -2996,6 +3163,8 @@ class Trading212Source(DescriptionBasedSource):
             "adjustments": str(total_adjustments) if self._csv_transactions else "N/A",
             "buy_cost": str(total_buy_cost),
             "sell_proceeds": str(total_sell_proceeds),
+            "currency_conversion_inflow": str(total_conversion_inflow),
+            "currency_conversion_fees": str(total_conversion_fees),
             "expected_cash": str(expected_cash),
             "actual_cash": str(actual_cash),
             "difference": str(cash_difference),
