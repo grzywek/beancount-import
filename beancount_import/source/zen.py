@@ -1041,7 +1041,7 @@ class ZenSource(Source):
         meta[SOURCE_DOC_KEY] = os.path.basename(statement.filename)
         
         # Add transaction date from CSV
-        meta['transaction_date'] = str(txn.date)
+        meta['transaction_date'] = txn.date
 
         # Determine payee and narration
         payee = txn.counterparty or 'Zen'
