@@ -2333,6 +2333,10 @@ class VelobankSource(Source):
         for statement in self.statements:
             # Determine target account for this statement
             target_account = self._get_account_for_iban(statement.account_iban)
+            print(f'[velobank DEBUG] statement.account_iban={statement.account_iban!r}, '
+                  f'target_account={target_account!r}, '
+                  f'account_map={self.account_map!r}, '
+                  f'default_account={self.default_account!r}')
             
             for txn in statement.transactions:
                 txn_id = _generate_transaction_id(txn)
