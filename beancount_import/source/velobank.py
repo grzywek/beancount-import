@@ -2322,11 +2322,8 @@ class VelobankSource(Source):
                 for posting in entry.postings:
                     if posting.meta is None:
                         continue
-                    # Check if posting belongs to any of our accounts
-                    if posting.account not in all_accounts:
-                        continue
                     stmt_ref = posting.meta.get(SOURCE_REF_KEY)
-                    if stmt_ref is not None:
+                    if stmt_ref is not None and stmt_ref.startswith('velobank:'):
                         matched_ids.setdefault(stmt_ref, []).append((entry, posting))
 
         # Process all transactions from all statements

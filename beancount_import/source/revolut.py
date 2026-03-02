@@ -1379,10 +1379,8 @@ class RevolutSource(Source):
                 for posting in entry.postings:
                     if posting.meta is None:
                         continue
-                    if posting.account not in all_accounts:
-                        continue
                     ref = posting.meta.get(SOURCE_REF_KEY)
-                    if ref is not None:
+                    if ref is not None and ref.startswith('revolut:'):
                         matched_ids.setdefault(ref, []).append((entry, posting))
 
         # Track for balance assertions
