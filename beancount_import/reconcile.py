@@ -663,7 +663,6 @@ class LoadedReconciler(object):
 
     def _get_fixme_transactions(self):
         output = []
-        skipped = []
         for entry in self.editor.entries:
             if isinstance(entry, Transaction):
                 if any(
@@ -675,13 +674,8 @@ class LoadedReconciler(object):
                     has_source_ref = any(
                         posting.meta and posting.meta.get('source_ref')
                         for posting in entry.postings)
-                    if has_source_ref:
-                        skipped.append(entry)
-                    else:
+                    if not has_source_ref:
                         output.append(entry)
-        print(f'[reconcile DEBUG] _get_fixme_transactions: returning {len(output)} entries, skipped {len(skipped)} with source_ref')
-        for e in skipped:
-            print(f'  skipped: {e.date} {e.payee!r} {e.narration!r}')
         return output
 
     def _add_uncleared_postings_from(self,

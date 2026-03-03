@@ -2330,15 +2330,9 @@ class VelobankSource(Source):
 
         # Process all transactions from all statements
         valid_ids = set()
-        print(f'[velobank DEBUG] prepare() called, {len(self.statements)} statements, '
-              f'all_accounts={all_accounts!r}, matched_ids keys={list(matched_ids.keys())[:5]}')
         for statement in self.statements:
             # Determine target account for this statement
             target_account = self._get_account_for_iban(statement.account_iban)
-            print(f'[velobank DEBUG] statement.account_iban={statement.account_iban!r}, '
-                  f'target_account={target_account!r}, '
-                  f'account_map={self.account_map!r}, '
-                  f'default_account={self.default_account!r}')
             
             for txn in statement.transactions:
                 txn_id = _generate_transaction_id(txn)
