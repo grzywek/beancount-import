@@ -333,6 +333,18 @@ def _get_exchange_suffix(ticker: str) -> Optional[str]:
     return None
 
 
+# Precision constant for quantizing Decimal values (5 decimal places)
+_QUANT_5 = Decimal("0.00001")
+
+
+def _quantize(value: Decimal, quant: Decimal = _QUANT_5) -> Decimal:
+    """Quantize a Decimal to a fixed number of decimal places.
+    
+    By default limits to 5 decimal places and strips unnecessary trailing zeros.
+    """
+    return value.quantize(quant).normalize()
+
+
 def _ticker_to_symbol(ticker: str, currency: Optional[str] = None, account_currency: str = "USD", 
                        include_exchange: bool = False, isin: Optional[str] = None) -> str:
     """Convert Trading 212 ticker to a beancount symbol.
@@ -1918,7 +1930,7 @@ class Trading212Source(DescriptionBasedSource):
                 total_fees += abs(csv_txn.finra_fee)
             
             stock_cost = abs(csv_txn.total) - total_fees
-            cost_per_share = stock_cost / csv_txn.num_shares
+            cost_per_share = _quantize(stock_cost / csv_txn.num_shares)
             cost_spec = CostSpec(
                 number_per=cost_per_share,  # Per-share cost in account currency (excluding fees)
                 number_total=None,
