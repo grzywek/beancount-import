@@ -199,7 +199,7 @@ class ApiPieDetail:
 @dataclass
 class CommodityInfo:
     """Information about a commodity for beancount declaration."""
-    symbol: str  # Beancount symbol (e.g., "AAPL", "WTAI.LSE")
+    symbol: str  # Beancount symbol (e.g., "AAPL", "WTAI-LSE")
     name: str  # Full instrument name
     isin: str  # ISIN code
     ticker: str  # Primary ticker (for Yahoo Finance lookup)
@@ -1402,8 +1402,8 @@ class Trading212Source(DescriptionBasedSource):
         source_desc = f"{txn.transaction_type} {txn.amount} {txn.currency}"
         
         meta = {
-            SOURCE_REF_KEY: f"{csv_txn.transaction_id}", SOURCE_KEY: SOURCE_ID, SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
             SOURCE_REF_KEY: txn.reference,
+            SOURCE_KEY: SOURCE_ID,
         }
         
         # Add all available transaction metadata
@@ -3002,6 +3002,7 @@ class Trading212Source(DescriptionBasedSource):
         # Generate control report to check for discrepancies
         # Report is saved to data_directory
         has_discrepancies = self._generate_control_report()
+        self._generate_detailed_balance_report()
         if has_discrepancies:
             pending_count = len(results.pending)
             print(f"[Trading212] ⚠️  DISCREPANCIES DETECTED — blocking all {pending_count} new entries!", flush=True)
@@ -3516,6 +3517,184 @@ class Trading212Source(DescriptionBasedSource):
                 print(f"  Splits from CSV only (no JSON counterpart): {dedup['csv_only_count']}", flush=True)
         
         return len(report["discrepancies"]) > 0
+
+    def _generate_detailed_balance_report(self) -> None:
+        """Generate a detailed per-line balance report showing running cash and position balances.
+
+        For every CSV transaction (sorted chronologically), the report shows:
+        - The original CSV line summary
+        - Which internal balances changed and by how much (delta)
+        - The running total for each affected balance
+
+        Output: data_directory/detailed_balance_report.txt
+        """
+        if not self.data_directory or not self._csv_transactions:
+            return
+
+        order_actions = {
+            "Market buy", "Market sell", "Stop buy", "Stop sell",
+            "Limit buy", "Limit sell", "Stop limit buy", "Stop limit sell",
+            "Market order", "Market buy fractional", "Market sell fractional",
+        }
+        dividend_actions = {a for t in self._csv_transactions for a in [t.action] if a.startswith("Dividend")}
+        stock_split_actions = {"Stock split open", "Stock split close"}
+        stock_distribution_actions = {"Stock distribution", "Custom stock distribution"}
+
+        # Running balances
+        cash: Dict[str, Decimal] = {}      # currency -> running cash balance
+        positions: Dict[str, Decimal] = {}  # ISIN -> running share count
+
+        def fmt_d(v: Decimal) -> str:
+            """Format decimal: strip trailing zeros, show sign for deltas."""
+            if v == 0:
+                return "0"
+            # Normalize to remove trailing zeros but keep 2 decimals minimum for cash
+            return f"{v}"
+
+        def fmt_delta(v: Decimal) -> str:
+            if v == 0:
+                return "0"
+            sign = "+" if v > 0 else ""
+            return f"{sign}{v}"
+
+        sorted_txns = sorted(self._csv_transactions, key=lambda t: t.time)
+
+        lines: list = []
+        lines.append("=" * 120)
+        lines.append("DETAILED BALANCE REPORT — Per-CSV-line running balances")
+        lines.append(f"Generated: {datetime.datetime.now().isoformat()}")
+        lines.append(f"Total CSV transactions: {len(sorted_txns)}")
+        lines.append("=" * 120)
+        lines.append("")
+
+        for txn in sorted_txns:
+            action = txn.action
+            cur = txn.currency
+            total = txn.total or D(0)
+            isin = txn.isin
+            ticker = txn.ticker or ""
+            shares = txn.num_shares or D(0)
+
+            deltas: list = []  # list of (label, delta_str)
+
+            if action == "Deposit":
+                cash[cur] = cash.get(cur, D(0)) + total
+                deltas.append((f"cash_{cur}", fmt_delta(total), fmt_d(cash[cur])))
+
+            elif action == "Withdrawal":
+                cash[cur] = cash.get(cur, D(0)) + total  # total is negative
+                deltas.append((f"cash_{cur}", fmt_delta(total), fmt_d(cash[cur])))
+
+            elif action in order_actions:
+                if "buy" in action.lower():
+                    cash_delta = -abs(total)
+                else:
+                    cash_delta = abs(total)
+                cash[cur] = cash.get(cur, D(0)) + cash_delta
+                deltas.append((f"cash_{cur}", fmt_delta(cash_delta), fmt_d(cash[cur])))
+
+                if isin and shares:
+                    if "buy" in action.lower():
+                        pos_delta = shares
+                    else:
+                        pos_delta = -shares
+                    positions[isin] = positions.get(isin, D(0)) + pos_delta
+                    deltas.append((f"pos_{ticker or isin}", fmt_delta(pos_delta), fmt_d(positions[isin])))
+
+            elif action in dividend_actions:
+                cash[cur] = cash.get(cur, D(0)) + total
+                deltas.append((f"cash_{cur}", fmt_delta(total), fmt_d(cash[cur])))
+
+            elif action == "Lending interest":
+                cash[cur] = cash.get(cur, D(0)) + total
+                deltas.append((f"cash_{cur}", fmt_delta(total), fmt_d(cash[cur])))
+
+            elif action == "Interest on cash":
+                cash[cur] = cash.get(cur, D(0)) + total
+                deltas.append((f"cash_{cur}", fmt_delta(total), fmt_d(cash[cur])))
+
+            elif action == "Result adjustment":
+                cash[cur] = cash.get(cur, D(0)) + total
+                deltas.append((f"cash_{cur}", fmt_delta(total), fmt_d(cash[cur])))
+
+            elif action == "ADR Fee":
+                cash[cur] = cash.get(cur, D(0)) + total  # total is negative
+                deltas.append((f"cash_{cur}", fmt_delta(total), fmt_d(cash[cur])))
+
+            elif action == "Currency conversion":
+                if txn.conversion_from_amount and txn.conversion_from_currency:
+                    from_cur = txn.conversion_from_currency
+                    from_delta = -txn.conversion_from_amount
+                    cash[from_cur] = cash.get(from_cur, D(0)) + from_delta
+                    deltas.append((f"cash_{from_cur}", fmt_delta(from_delta), fmt_d(cash[from_cur])))
+                if txn.conversion_to_amount and txn.conversion_to_currency:
+                    to_cur = txn.conversion_to_currency
+                    to_delta = txn.conversion_to_amount
+                    cash[to_cur] = cash.get(to_cur, D(0)) + to_delta
+                    deltas.append((f"cash_{to_cur}", fmt_delta(to_delta), fmt_d(cash[to_cur])))
+                if txn.conversion_fee and txn.conversion_fee_currency:
+                    fee_cur = txn.conversion_fee_currency
+                    fee_delta = txn.conversion_fee  # negative in CSV
+                    cash[fee_cur] = cash.get(fee_cur, D(0)) + fee_delta
+                    deltas.append((f"cash_{fee_cur}_fee", fmt_delta(fee_delta), fmt_d(cash[fee_cur])))
+
+            elif action in stock_split_actions:
+                if isin and shares:
+                    if "open" in action.lower():
+                        pos_delta = shares
+                    else:
+                        pos_delta = -shares
+                    positions[isin] = positions.get(isin, D(0)) + pos_delta
+                    deltas.append((f"pos_{ticker or isin}", fmt_delta(pos_delta), fmt_d(positions[isin])))
+
+            elif action in stock_distribution_actions:
+                if isin and shares:
+                    positions[isin] = positions.get(isin, D(0)) + shares
+                    deltas.append((f"pos_{ticker or isin}", fmt_delta(shares), fmt_d(positions[isin])))
+
+            else:
+                deltas.append(("???", f"total={total} {cur}", "UNHANDLED"))
+
+            # Format the output line
+            time_str = txn.time.strftime("%Y-%m-%d %H:%M:%S")
+            src = os.path.basename(txn.source_file) if txn.source_file else ""
+
+            # Header: action | time | ticker | total
+            hdr_parts = [f"{action}", f"{time_str}"]
+            if ticker:
+                hdr_parts.append(ticker)
+            if total != D(0):
+                hdr_parts.append(f"total={total} {cur}")
+            if shares and isin:
+                hdr_parts.append(f"shares={shares}")
+            lines.append(" | ".join(hdr_parts))
+
+            # Balance changes
+            for label, delta, running in deltas:
+                lines.append(f"    {label}: {running} ({delta})")
+
+            lines.append("")
+
+        # Final summary
+        lines.append("=" * 120)
+        lines.append("FINAL RUNNING BALANCES")
+        lines.append("=" * 120)
+        lines.append("")
+        lines.append("Cash balances:")
+        for cur in sorted(cash.keys()):
+            lines.append(f"  {cur}: {fmt_d(cash[cur])}")
+        lines.append("")
+        lines.append("Non-zero positions:")
+        for isin in sorted(positions.keys()):
+            if positions[isin] != D(0):
+                lines.append(f"  {isin}: {fmt_d(positions[isin])}")
+
+        # Write report
+        report_path = os.path.join(self.data_directory, "detailed_balance_report.txt")
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(lines) + "\n")
+
+        print(f"[Trading212] Detailed balance report: {report_path}", flush=True)
 
     def _collect_commodities(self) -> Dict[str, CommodityInfo]:
         """Collect all unique commodities from CSV transactions and positions.
