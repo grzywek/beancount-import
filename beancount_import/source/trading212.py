@@ -219,8 +219,8 @@ class CorporateAction:
     ticker: str
     action_type: str  # "split", "reverse_split", "merger", "delisting", "spinoff"
     date: datetime.date
-    ratio_from: int  # e.g., 30 for 30:1 reverse split
-    ratio_to: int    # e.g., 1 for 30:1 reverse split
+    ratio_from: Decimal  # e.g., 30 for 30:1 reverse split (use Decimal to support non-integer ratios)
+    ratio_to: Decimal    # e.g., 1 for 30:1 reverse split
     note: Optional[str] = None
 
 
@@ -716,8 +716,8 @@ class Trading212Source(DescriptionBasedSource):
                             ticker=ca["ticker"],
                             action_type=ca["type"],
                             date=datetime.datetime.strptime(ca["date"], "%Y-%m-%d").date(),
-                            ratio_from=int(ca["ratio_from"]),
-                            ratio_to=int(ca["ratio_to"]),
+                            ratio_from=D(str(ca["ratio_from"])),
+                            ratio_to=D(str(ca["ratio_to"])),
                             note=ca.get("note"),
                         ))
                     except (KeyError, ValueError) as e:
@@ -3182,10 +3182,22 @@ class Trading212Source(DescriptionBasedSource):
         expected_positions: Dict[str, Decimal] = {}  # Key: ISIN
         isin_to_symbol: Dict[str, str] = {}  # Map ISIN to beancount symbol
         
-        # Build a map of corporate actions by ISIN for quick lookup
+        # Build set of (isin, date) already covered by CSV stock splits
+        # so the same event is not double-applied as both a CSV close/open pair
+        # and as a corporate_actions.json adjustment to prior buy quantities.
+        csv_split_isin_dates_for_ca: set = set()
+        for _close, _open, _r in self._pair_csv_stock_splits():
+            ref = _close or _open
+            if ref and ref.isin:
+                csv_split_isin_dates_for_ca.add((ref.isin, ref.time.date()))
+        
+        # Build a map of corporate actions by ISIN for quick lookup.
+        # Exclude any split that is already represented in the CSV data.
         ca_by_isin: Dict[str, List[CorporateAction]] = {}
         if self._corporate_actions:
             for ca in self._corporate_actions:
+                if (ca.isin, ca.date) in csv_split_isin_dates_for_ca:
+                    continue  # Handled by CSV close/open pair; skip to avoid double-count
                 if ca.isin not in ca_by_isin:
                     ca_by_isin[ca.isin] = []
                 ca_by_isin[ca.isin].append(ca)
