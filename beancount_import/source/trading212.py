@@ -2930,11 +2930,23 @@ class Trading212Source(DescriptionBasedSource):
                     if entry.meta and "corporate_action_ref" in entry.meta:
                         matched_ca_refs.add(entry.meta["corporate_action_ref"])
             
+            # Build set of (isin, date) already covered by CSV stock splits
+            # so we don't double-apply the same split from corporate_actions.json
+            csv_split_isin_dates: set = set()
+            for _close, _open, _r in stock_split_pairs:
+                ref = _close or _open
+                if ref and ref.isin:
+                    csv_split_isin_dates.add((ref.isin, ref.time.date()))
+            
             for ca in self._corporate_actions:
                 # Create unique ref for this corporate action
                 ca_ref = f"{ca.isin}:{ca.date}:{ca.action_type}"
                 
                 if ca_ref in matched_ca_refs:
+                    continue
+                
+                # Skip if this split is already present in the CSV data
+                if (ca.isin, ca.date) in csv_split_isin_dates:
                     continue
                 
                 # Only generate for splits (forward and reverse)
