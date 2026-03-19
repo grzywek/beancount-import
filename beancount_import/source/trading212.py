@@ -3293,6 +3293,71 @@ class Trading212Source(DescriptionBasedSource):
         # Store applied actions in report
         report["corporate_actions_applied"] = applied_actions
         
+        # =====================================================================
+        # Corporate actions deduplication analysis
+        # (entries present in both corporate_actions.json and CSV)
+        # =====================================================================
+        csv_split_isin_dates: set = set()
+        for _close, _open, _r in self._pair_csv_stock_splits():
+            ref = _close or _open
+            if ref and ref.isin:
+                csv_split_isin_dates.add((ref.isin, ref.time.date()))
+        
+        ca_deduplicated = []   # skipped because already in CSV
+        ca_json_only = []      # only in JSON (will be imported from JSON)
+        ca_csv_only = []       # only in CSV (no JSON counterpart)
+        
+        if self._corporate_actions:
+            json_isin_dates = set()
+            for ca in self._corporate_actions:
+                if ca.action_type in ("split", "reverse_split"):
+                    json_isin_dates.add((ca.isin, ca.date))
+                    if (ca.isin, ca.date) in csv_split_isin_dates:
+                        ca_deduplicated.append({
+                            "isin": ca.isin,
+                            "ticker": ca.ticker,
+                            "date": str(ca.date),
+                            "type": ca.action_type,
+                            "ratio": f"{ca.ratio_from}:{ca.ratio_to}",
+                            "note": ca.note or "",
+                            "source": "both_csv_and_json",
+                        })
+                    else:
+                        ca_json_only.append({
+                            "isin": ca.isin,
+                            "ticker": ca.ticker,
+                            "date": str(ca.date),
+                            "type": ca.action_type,
+                            "ratio": f"{ca.ratio_from}:{ca.ratio_to}",
+                            "note": ca.note or "",
+                            "source": "json_only",
+                        })
+            
+            # CSV splits that have no JSON counterpart
+            for isin, split_date in sorted(csv_split_isin_dates):
+                if (isin, split_date) not in json_isin_dates:
+                    ticker = isin_to_symbol.get(isin, isin)
+                    ca_csv_only.append({
+                        "isin": isin,
+                        "symbol": ticker,
+                        "date": str(split_date),
+                        "source": "csv_only",
+                    })
+        
+        report["corporate_actions_deduplication"] = {
+            "csv_splits_total": len(csv_split_isin_dates),
+            "json_splits_total": sum(
+                1 for ca in (self._corporate_actions or [])
+                if ca.action_type in ("split", "reverse_split")
+            ),
+            "deduplicated_count": len(ca_deduplicated),
+            "json_only_count": len(ca_json_only),
+            "csv_only_count": len(ca_csv_only),
+            "deduplicated": ca_deduplicated,
+            "json_only": ca_json_only,
+            "csv_only": ca_csv_only,
+        }
+        
         # Compare with actual positions from API (keyed by ISIN)
         actual_positions: Dict[str, Decimal] = {}
         for p in (self._positions or []):
@@ -3419,6 +3484,19 @@ class Trading212Source(DescriptionBasedSource):
             print(f"  ⚠️  {len(report['discrepancies'])} discrepancies found - check report for details", flush=True)
         if report["warnings"]:
             print(f"  ⚠️  {len(report['warnings'])} warnings - check report for details", flush=True)
+        
+        # Print corporate action deduplication summary
+        dedup = report["corporate_actions_deduplication"]
+        if dedup["deduplicated_count"] > 0 or dedup["csv_splits_total"] > 0 or dedup["json_splits_total"] > 0:
+            print(f"  Corporate action splits: CSV={dedup['csv_splits_total']}, JSON={dedup['json_splits_total']}", flush=True)
+            if dedup["deduplicated_count"] > 0:
+                print(f"  ⚠️  {dedup['deduplicated_count']} split(s) present in BOTH CSV and JSON (JSON entry skipped to avoid double-application):", flush=True)
+                for entry in dedup["deduplicated"]:
+                    print(f"      {entry['date']} {entry['ticker']} ({entry['isin']}) {entry['type']} {entry['ratio']}", flush=True)
+            if dedup["json_only_count"] > 0:
+                print(f"  Corporate actions from JSON only (will be applied): {dedup['json_only_count']}", flush=True)
+            if dedup["csv_only_count"] > 0:
+                print(f"  Splits from CSV only (no JSON counterpart): {dedup['csv_only_count']}", flush=True)
 
     def _collect_commodities(self) -> Dict[str, CommodityInfo]:
         """Collect all unique commodities from CSV transactions and positions.
