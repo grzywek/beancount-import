@@ -67,7 +67,7 @@ from typing import (
 
 
 from beancount.core.amount import Amount
-from beancount.core.data import Balance, Commodity, Custom, Directive, Document, Open, Posting, Price, Transaction, TxnPosting, EMPTY_SET
+from beancount.core.data import Balance, Commodity, Custom, Directive, Document, Open, Posting, Transaction, TxnPosting, EMPTY_SET
 from beancount.core.number import D
 
 from beancount_import.journal_editor import JournalEditor
@@ -2907,32 +2907,6 @@ class Trading212Source(DescriptionBasedSource):
                     "ticker": position.ticker,
                 },
             ))
-        
-        # Generate Price directives from current_price in positions
-        # If fetched between 00:00-05:00, use previous day (market was closed)
-        price_date = positions_date
-        if self._positions_fetched_at:
-            hour = self._positions_fetched_at.hour
-            if 0 <= hour < 5:
-                price_date = positions_date - datetime.timedelta(days=1)
-        
-        for position in self._positions:
-            if position.current_price and position.current_price > 0:
-                symbol = self._get_beancount_symbol(position.ticker, position.isin)
-                price_directive = Price(
-                    meta={"filename": "<trading212-positions>", "lineno": 0},
-                    date=price_date,
-                    currency=symbol,
-                    amount=Amount(position.current_price, position.currency),
-                )
-                results.add_pending_entry(ImportResult(
-                    date=price_date,
-                    entries=[price_directive],
-                    info={
-                        "type": "trading212_price",
-                        "ticker": position.ticker,
-                    },
-                ))
         
         # Generate cash balance assertion (use fetched_at date from account_summary)
         if self._account_summary:
