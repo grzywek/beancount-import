@@ -2661,8 +2661,6 @@ class Trading212Source(DescriptionBasedSource):
         account_set = {self.cash_vault_account, self.cash_trade_account}
         
         # Collect all unique references from journal to match against
-        matched_order_ids: Dict[str, List[Tuple[Transaction, Posting]]] = {}
-        matched_dividend_refs: Dict[str, List[Tuple[Transaction, Posting]]] = {}
         matched_transaction_refs: Dict[str, List[Tuple[Transaction, Posting]]] = {}
         
         for entry in journal.all_entries:
@@ -2681,24 +2679,17 @@ class Trading212Source(DescriptionBasedSource):
                 if posting.meta is None:
                     continue
                 
-                # Primary matching using source_ref key (format: "trading212:ID")
                 source_ref = posting.meta.get(SOURCE_REF_KEY)
-                if source_ref and source_ref.startswith("trading212:"):
+                if not source_ref:
+                    continue
+                
+                # Match with "trading212:" prefix stripped
+                if source_ref.startswith("trading212:"):
                     txn_id = source_ref[len("trading212:"):]
                     matched_transaction_refs.setdefault(txn_id, []).append((entry, posting))
                 
-                # Also match source_ref without prefix (new format)
-                if source_ref:
-                    matched_transaction_refs.setdefault(source_ref, []).append((entry, posting))
-                
-                # Legacy matching for backward compatibility
-                order_id = posting.meta.get(SOURCE_REF_KEY)
-                if order_id and order_id != source_ref:  # Avoid duplicate if same as source_ref
-                    matched_order_ids.setdefault(order_id, []).append((entry, posting))
-                
-                div_ref = posting.meta.get(SOURCE_REF_KEY)
-                if div_ref:
-                    matched_dividend_refs.setdefault(div_ref, []).append((entry, posting))
+                # Also match source_ref as-is (plain ID format)
+                matched_transaction_refs.setdefault(source_ref, []).append((entry, posting))
         
         # =====================================================================
         # CSV-FIRST PROCESSING
@@ -2877,7 +2868,7 @@ class Trading212Source(DescriptionBasedSource):
             for order in self._pending_orders:
                 order_id = str(order.order_id)
                 
-                if order_id in matched_order_ids:
+                if order_id in matched_transaction_refs:
                     continue
                 
                 txn = self._make_forecast_transaction(order)
