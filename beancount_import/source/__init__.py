@@ -133,14 +133,19 @@ class SourceResults:
     def add_pending_entry(self, entry: ImportResult):
         """Adds a generated ImportResult.
         
-        If earliest_transaction is set, entries with dates before it are skipped.
+        If earliest_transaction is set, Transaction entries with dates before it
+        are skipped.  Non-transaction directives (Commodity, Balance, etc.) are
+        never filtered by date because they may legitimately use historical dates.
         For Document entries, converts filename to path relative to document_output_dir.
         """
         import os
-        from beancount.core.data import Document
+        from beancount.core.data import Document, Transaction
         
         if self.earliest_transaction and entry.date < self.earliest_transaction:
-            return  # Skip entries before earliest_transaction
+            # Only filter if this ImportResult contains transactions
+            has_transactions = any(isinstance(e, Transaction) for e in entry.entries)
+            if has_transactions:
+                return  # Skip transaction entries before earliest_transaction
         
         # Convert Document filenames to relative paths from document_output_dir
         if self.document_output_dir:
