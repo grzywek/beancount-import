@@ -3001,9 +3001,14 @@ class Trading212Source(DescriptionBasedSource):
         
         # Generate control report to check for discrepancies
         # Report is saved to data_directory
-        self._generate_control_report()
+        has_discrepancies = self._generate_control_report()
+        if has_discrepancies:
+            pending_count = len(results.pending)
+            print(f"[Trading212] ⚠️  DISCREPANCIES DETECTED — blocking all {pending_count} new entries!", flush=True)
+            print(f"[Trading212] Fix the data source (re-export CSV, update API snapshot) and retry.", flush=True)
+            results.pending.clear()
 
-    def _generate_control_report(self) -> None:
+    def _generate_control_report(self) -> bool:
         """Generate a control report comparing calculated vs actual balances.
         
         This report helps identify data gaps, missing transactions, or discrepancies
@@ -3011,7 +3016,7 @@ class Trading212Source(DescriptionBasedSource):
         positions/balances reported by the API.
         """
         if not self.data_directory:
-            return
+            return False
         
         print("\n[Trading212] Generating control report...", flush=True)
         
@@ -3509,6 +3514,8 @@ class Trading212Source(DescriptionBasedSource):
                 print(f"  Corporate actions from JSON only (will be applied): {dedup['json_only_count']}", flush=True)
             if dedup["csv_only_count"] > 0:
                 print(f"  Splits from CSV only (no JSON counterpart): {dedup['csv_only_count']}", flush=True)
+        
+        return len(report["discrepancies"]) > 0
 
     def _collect_commodities(self) -> Dict[str, CommodityInfo]:
         """Collect all unique commodities from CSV transactions and positions.
