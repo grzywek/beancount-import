@@ -564,6 +564,8 @@ class Trading212Source(DescriptionBasedSource):
         self._symbol_registry: Dict[str, List[Tuple[str, str]]] = {}
         # Maps original ticker -> final beancount symbol
         self._ticker_to_beancount_symbol: Dict[str, str] = {}
+        # Maps ISIN -> final beancount symbol (for fallback lookups)
+        self._isin_to_beancount_symbol: Dict[str, str] = {}
 
     def _get_vault_account_for_currency(self, currency: str) -> str:
         """Get the vault account for a specific currency.
@@ -838,6 +840,20 @@ class Trading212Source(DescriptionBasedSource):
                     return f"{symbol}-{exchange_code}"
                 else:
                     return f"{symbol}X"  # Pad with X if no exchange known
+            return symbol
+        
+        # ISIN-based fallback: ticker not in registry (e.g. instruments.json API ticker)
+        # but the ISIN is known from CSV/positions — use the canonical symbol for that ISIN
+        if isin and isin in self._isin_to_beancount_symbol:
+            symbol = self._isin_to_beancount_symbol[isin]
+            # Cache for future lookups
+            self._ticker_to_beancount_symbol[ticker] = symbol
+            if len(symbol) < 2:
+                _, exchange_code, _ = _get_exchange_from_ticker(ticker, isin)
+                if exchange_code:
+                    return f"{symbol}-{exchange_code}"
+                else:
+                    return f"{symbol}X"
             return symbol
         
         # Fallback if not in registry (shouldn't happen normally)
