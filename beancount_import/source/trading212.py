@@ -797,7 +797,7 @@ class Trading212Source(DescriptionBasedSource):
                     if i == 0 and len(base_symbol) >= 2:
                         isin_to_beancount[isin] = base_symbol
                     else:
-                        isin_to_beancount[isin] = f"{base_symbol}.{i+1}" if len(base_symbol) >= 2 else f"{base_symbol}X.{i+1}"
+                        isin_to_beancount[isin] = f"{base_symbol}-{i+1}" if len(base_symbol) >= 2 else f"{base_symbol}X-{i+1}"
         
         # Build ticker -> beancount symbol mapping (all tickers for same ISIN get same symbol)
         # Store ISIN -> beancount for lookups
