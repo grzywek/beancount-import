@@ -10,6 +10,8 @@ from unittest import mock
 
 import pytest
 
+from beancount.core.data import Balance, Document
+from beancount_import.source import SourceResults
 from beancount_import.source.trading212 import (
     Trading212Source,
     Trading212DataError,
@@ -154,6 +156,40 @@ class TestTrading212Source:
         )
         values.update(overrides)
         return CsvTransaction(**values)
+
+    def _write_json(self, directory, filename, data):
+        with open(os.path.join(directory, filename), "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def _zero_account_summary(self):
+        return {
+            "account_id": 12345,
+            "currency": "USD",
+            "cash_available": "0",
+            "cash_in_pies": "0",
+            "cash_reserved": "0",
+            "investments_value": "0",
+            "total_value": "0",
+        }
+
+    def _position_json_item(self, **overrides):
+        values = {
+            "ticker": "AAPL",
+            "isin": "US0378331005",
+            "name": "Apple",
+            "quantity": "3",
+            "average_price": "150",
+            "current_price": "170",
+            "currency": "USD",
+            "total_cost": "450",
+            "current_value": "510",
+        }
+        values.update(overrides)
+        return values
+
+    class _EmptyJournal:
+        all_entries = []
+        commodities = {}
     
     def test_get_symbol_account(self, test_data_dir):
         source = Trading212Source(
@@ -161,6 +197,83 @@ class TestTrading212Source:
             investment_account="Assets:Trading212",
         )
         assert source._get_symbol_account("AAPL_US_EQ") == "Assets:Trading212:AAPL"
+
+    def test_prepare_does_not_generate_balances_from_undated_json(self, test_data_dir):
+        self._write_json(test_data_dir, "account_summary.json", self._zero_account_summary())
+
+        source = Trading212Source(
+            directory=test_data_dir,
+            cash_trade_account="Assets:Trading212:Cash",
+            investment_account="Assets:Trading212:Holdings",
+        )
+        results = SourceResults()
+
+        source.prepare(self._EmptyJournal(), results)
+
+        balances = [
+            entry
+            for pending in results.pending
+            for entry in pending.entries
+            if isinstance(entry, Balance)
+        ]
+        assert balances == []
+
+    def test_prepare_generates_balances_and_documents_from_dated_json(self, test_data_dir):
+        self._write_json(test_data_dir, "account_summary.json", self._zero_account_summary())
+        self._write_json(test_data_dir, "positions_2026-05-01.json", {
+            "fetched_at": "2026-05-02T12:00:00",
+            "items": [self._position_json_item()],
+        })
+        self._write_json(test_data_dir, "account_summary_2026-05-01.json", {
+            "fetched_at": "2026-05-02T12:00:00",
+            "account_id": 12345,
+            "currency": "USD",
+            "cash_available": "12.50",
+            "cash_in_pies": "1.00",
+            "cash_reserved": "0.25",
+            "investments_value": "510",
+            "total_value": "523.75",
+        })
+
+        source = Trading212Source(
+            directory=test_data_dir,
+            cash_trade_account="Assets:Trading212:Cash",
+            investment_account="Assets:Trading212:Holdings",
+        )
+        results = SourceResults()
+
+        source.prepare(self._EmptyJournal(), results)
+
+        balances = [
+            entry
+            for pending in results.pending
+            for entry in pending.entries
+            if isinstance(entry, Balance)
+        ]
+        assert len(balances) == 2
+
+        stock_balance = next(b for b in balances if b.account.endswith(":AAPL"))
+        assert stock_balance.date == datetime.date(2026, 5, 1)
+        assert stock_balance.amount.number == Decimal("3")
+        assert stock_balance.amount.currency == "AAPL"
+        assert stock_balance.meta["document"] == "positions_2026-05-01.json"
+        assert stock_balance.meta["manual"] is False
+
+        cash_balance = next(b for b in balances if b.account == "Assets:Trading212:Cash")
+        assert cash_balance.date == datetime.date(2026, 5, 1)
+        assert cash_balance.amount.number == Decimal("13.75")
+        assert cash_balance.amount.currency == "USD"
+        assert cash_balance.meta["document"] == "account_summary_2026-05-01.json"
+        assert cash_balance.meta["manual"] is False
+
+        document_names = {
+            os.path.basename(entry.filename)
+            for pending in results.pending
+            for entry in pending.entries
+            if isinstance(entry, Document)
+        }
+        assert "positions_2026-05-01.json" in document_names
+        assert "account_summary_2026-05-01.json" in document_names
     
     def test_make_order_transaction_buy(self, test_data_dir):
         source = Trading212Source(
