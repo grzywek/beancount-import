@@ -140,7 +140,7 @@ class TestGenerateTransactionId:
         )
         
         result = _generate_transaction_id(txn)
-        assert result == "mBank:12345"
+        assert result == "eb_mBank:12345"
 
 
 class TestEnableBankingSource:
