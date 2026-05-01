@@ -242,7 +242,7 @@ EXCHANGE_INFO = {
 
 
 
-def _get_exchange_from_ticker(ticker: str, isin: Optional[str] = None) -> Tuple[str, str, str]:
+def _get_exchange_from_ticker(ticker: Optional[str], isin: Optional[str] = None) -> Tuple[str, str, str]:
     """Determine the exchange from Trading 212 ticker format.
     
     Only returns exchange info when we can definitively determine it from
@@ -289,7 +289,7 @@ def _parse_date(s: Optional[str]) -> Optional[datetime.date]:
         return None
 
 
-def _ticker_to_base_symbol(ticker: str) -> str:
+def _ticker_to_base_symbol(ticker: Optional[str]) -> str:
     """Extract base symbol from Trading 212 ticker (without exchange suffix).
     
     Trading 212 uses tickers like:
@@ -300,6 +300,9 @@ def _ticker_to_base_symbol(ticker: str) -> str:
     
     The lowercase letter suffix indicates the exchange/market.
     """
+    if not ticker:
+        return ""
+
     if "_" in ticker:
         symbol = ticker.split("_")[0]
     else:
@@ -316,12 +319,15 @@ def _ticker_to_base_symbol(ticker: str) -> str:
     return symbol
 
 
-def _get_exchange_suffix(ticker: str) -> Optional[str]:
+def _get_exchange_suffix(ticker: Optional[str]) -> Optional[str]:
     """Extract exchange suffix from Trading 212 ticker.
     
     Returns the lowercase letter suffix if present (e.g., 'l' for London),
     or None for US stocks.
     """
+    if not ticker:
+        return None
+
     if "_" in ticker:
         symbol = ticker.split("_")[0]
     else:
@@ -825,13 +831,13 @@ class Trading212Source(DescriptionBasedSource):
                 symbols = [isin_to_beancount[isin] for isin in isins]
                 print(f"  {base}: {', '.join(symbols)}", flush=True)
 
-    def _get_beancount_symbol(self, ticker: str, isin: Optional[str] = None) -> str:
+    def _get_beancount_symbol(self, ticker: Optional[str], isin: Optional[str] = None) -> str:
         """Get the final beancount symbol for a Trading 212 ticker.
         
         Uses the symbol registry to determine if exchange suffix is needed.
         Beancount requires minimum 2 characters for commodity names.
         """
-        if ticker in self._ticker_to_beancount_symbol:
+        if ticker and ticker in self._ticker_to_beancount_symbol:
             symbol = self._ticker_to_beancount_symbol[ticker]
             # Ensure minimum 2 characters for beancount
             if len(symbol) < 2:
@@ -847,7 +853,8 @@ class Trading212Source(DescriptionBasedSource):
         if isin and isin in self._isin_to_beancount_symbol:
             symbol = self._isin_to_beancount_symbol[isin]
             # Cache for future lookups
-            self._ticker_to_beancount_symbol[ticker] = symbol
+            if ticker:
+                self._ticker_to_beancount_symbol[ticker] = symbol
             if len(symbol) < 2:
                 _, exchange_code, _ = _get_exchange_from_ticker(ticker, isin)
                 if exchange_code:
@@ -858,6 +865,8 @@ class Trading212Source(DescriptionBasedSource):
         
         # Fallback if not in registry (shouldn't happen normally)
         base_symbol = _ticker_to_base_symbol(ticker)
+        if not base_symbol:
+            raise Trading212DataError("Cannot determine beancount symbol for CSV transaction without ticker or known ISIN")
         
         # Ensure minimum 2 characters for beancount
         if len(base_symbol) < 2:
@@ -2070,16 +2079,18 @@ class Trading212Source(DescriptionBasedSource):
         """
         date = csv_txn.time.date()
         
-        # Get the symbol for this stock
-        symbol = self._get_beancount_symbol(csv_txn.ticker, csv_txn.isin)
-        income_account = f"{self.dividend_income_account}:{symbol}"
+        # Dividend adjustments may not be tied to a specific instrument.
+        symbol = None
+        if csv_txn.ticker or csv_txn.isin:
+            symbol = self._get_beancount_symbol(csv_txn.ticker, csv_txn.isin)
+        income_account = f"{self.dividend_income_account}:{symbol}" if symbol else self.dividend_income_account
         
         # Extract dividend type from action (e.g., "Dividend (Ordinary)" -> "Ordinary")
         div_type = "Dividend"
         if "(" in csv_txn.action and ")" in csv_txn.action:
             div_type = csv_txn.action.split("(")[1].rstrip(")")
         
-        source_desc = f"Dividend ({div_type}): {symbol}"
+        source_desc = f"Dividend ({div_type}): {symbol}" if symbol else f"Dividend ({div_type})"
         
         # Minimal meta for all postings on Trading212 accounts (for clearing)
         source_ref_meta = {SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{csv_txn.transaction_id}"}
@@ -2099,9 +2110,10 @@ class Trading212Source(DescriptionBasedSource):
             meta["quantity"] = str(csv_txn.num_shares)
         
         # Add pie info if available
-        pies = self._get_pies_for_ticker(csv_txn.ticker)
-        if pies:
-            meta["pie"] = ", ".join(pies)
+        if csv_txn.ticker:
+            pies = self._get_pies_for_ticker(csv_txn.ticker)
+            if pies:
+                meta["pie"] = ", ".join(pies)
         
         postings = []
         
@@ -2166,7 +2178,7 @@ class Trading212Source(DescriptionBasedSource):
                 meta=source_ref_meta.copy(),
             ))
         
-        narration = f"Dividend ({div_type}) - {symbol}"
+        narration = f"Dividend ({div_type}) - {symbol}" if symbol else csv_txn.action
         
         return Transaction(
             meta={
@@ -2178,6 +2190,102 @@ class Trading212Source(DescriptionBasedSource):
             flag="*",
             payee="TRADING 212",
             narration=narration,
+            tags=frozenset(),
+            links=frozenset(),
+            postings=postings,
+        )
+
+    def _make_csv_security_transfer_transaction(self, csv_txn: CsvTransaction) -> Transaction:
+        """Create a beancount transaction for a stock transfer in or out.
+
+        Trading 212 CSV exports include a market value in Total for security
+        transfers. That value is informational: no broker cash moved, so the
+        generated transaction only moves the position against the transfer
+        account.
+        """
+        from beancount.core.position import CostSpec
+
+        date = csv_txn.time.date()
+        is_transfer_in = csv_txn.action == "Transfer in"
+
+        symbol = self._get_beancount_symbol(csv_txn.ticker, csv_txn.isin)
+        symbol_account = f"{self.investment_account}:{symbol}"
+        quantity = csv_txn.num_shares or D("0")
+        signed_quantity = quantity if is_transfer_in else -abs(quantity)
+
+        meta = {
+            SOURCE_REF_KEY: f"{csv_txn.transaction_id}",
+            SOURCE_KEY: SOURCE_ID,
+            SOURCE_DOC_KEY: os.path.basename(csv_txn.source_file) if csv_txn.source_file else None,
+        }
+        meta[TRANSACTION_TYPE_KEY] = csv_txn.action
+        if csv_txn.ticker:
+            meta[TICKER_KEY] = csv_txn.ticker
+        if csv_txn.isin:
+            meta[ISIN_KEY] = csv_txn.isin
+        if csv_txn.name:
+            meta[INSTRUMENT_NAME_KEY] = csv_txn.name
+        meta["transaction_time"] = csv_txn.time.isoformat()
+        if csv_txn.notes:
+            meta["notes"] = csv_txn.notes
+        if csv_txn.total is not None:
+            meta["transfer_value"] = str(csv_txn.total)
+            meta["transfer_value_currency"] = csv_txn.currency
+        if csv_txn.price_per_share is not None:
+            meta["price_per_share"] = str(csv_txn.price_per_share)
+        if csv_txn.price_currency:
+            meta["price_currency"] = csv_txn.price_currency
+
+        if is_transfer_in:
+            cost_per_share = csv_txn.price_per_share
+            if not cost_per_share and quantity:
+                cost_per_share = _quantize(abs(csv_txn.total) / quantity)
+            cost_spec = CostSpec(
+                number_per=cost_per_share,
+                number_total=None,
+                currency=csv_txn.currency,
+                date=date,
+                label=None,
+                merge=None,
+            )
+        else:
+            cost_spec = CostSpec(
+                number_per=None,
+                number_total=None,
+                currency=None,
+                date=None,
+                label=None,
+                merge=None,
+            )
+
+        postings = [
+            Posting(
+                account=symbol_account,
+                units=Amount(signed_quantity, symbol),
+                cost=cost_spec,
+                price=None,
+                flag=None,
+                meta={**meta},
+            ),
+            Posting(
+                account=self.transfer_account,
+                units=None,
+                cost=None,
+                price=None,
+                flag=None,
+                meta={SOURCE_KEY: SOURCE_ID, SOURCE_REF_KEY: f"{csv_txn.transaction_id}"},
+            ),
+        ]
+
+        return Transaction(
+            meta={
+                "filename": "<trading212-csv>",
+                "lineno": 0,
+            },
+            date=date,
+            flag="*",
+            payee="TRADING 212",
+            narration=f"{csv_txn.action} - {symbol}",
             tags=frozenset(),
             links=frozenset(),
             postings=postings,
@@ -2724,6 +2832,7 @@ class Trading212Source(DescriptionBasedSource):
             dividend_actions = {a for a in set(t.action for t in self._csv_transactions) if a.startswith("Dividend")}
             stock_distribution_actions = {"Stock distribution", "Custom stock distribution"}
             stock_split_actions = {"Stock split open", "Stock split close"}
+            security_transfer_actions = {"Transfer in", "Transfer out"}
             
             for csv_txn in self._csv_transactions:
                 # Skip if already matched using the unified trading212_transaction_ref key
@@ -2764,8 +2873,11 @@ class Trading212Source(DescriptionBasedSource):
                 elif action in dividend_actions:
                     txn = self._make_csv_dividend_transaction(csv_txn)
                     txn_type = "trading212_dividend"
-                    symbol = self._get_beancount_symbol(csv_txn.ticker, csv_txn.isin)
-                    account_set.add(f"{self.dividend_income_account}:{symbol}")
+                    if csv_txn.ticker or csv_txn.isin:
+                        symbol = self._get_beancount_symbol(csv_txn.ticker, csv_txn.isin)
+                        account_set.add(f"{self.dividend_income_account}:{symbol}")
+                    else:
+                        account_set.add(self.dividend_income_account)
                     
                 elif action == "Deposit":
                     txn = self._make_csv_deposit_transaction(csv_txn)
@@ -2790,6 +2902,14 @@ class Trading212Source(DescriptionBasedSource):
                     symbol_account = f"{self.investment_account}:{symbol}"
                     account_set.add(symbol_account)
                     
+                elif action in security_transfer_actions:
+                    txn = self._make_csv_security_transfer_transaction(csv_txn)
+                    txn_type = "trading212_security_transfer"
+                    symbol = self._get_beancount_symbol(csv_txn.ticker, csv_txn.isin)
+                    symbol_account = f"{self.investment_account}:{symbol}"
+                    account_set.add(symbol_account)
+                    account_set.add(self.transfer_account)
+
                 elif action in stock_split_actions:
                     # Skip individual stock split transactions - they are paired and 
                     # processed as custom "autobean.stock_split" directives after the loop
@@ -3074,6 +3194,8 @@ class Trading212Source(DescriptionBasedSource):
         csv_adjustments = [t for t in (self._csv_transactions or []) if t.action == "Result adjustment"]
         csv_adr_fees = [t for t in (self._csv_transactions or []) if t.action == "ADR Fee"]
         csv_currency_conversions = [t for t in (self._csv_transactions or []) if t.action == "Currency conversion"]
+        csv_security_transfers = [t for t in (self._csv_transactions or [])
+                                  if t.action in ("Transfer in", "Transfer out")]
         
         report["summary"] = {
             "data_source": "CSV",
@@ -3301,6 +3423,17 @@ class Trading212Source(DescriptionBasedSource):
                     if "open" in t.action.lower():
                         expected_positions[isin] = expected_positions.get(isin, D(0)) + adjusted_qty
                     else:  # close
+                        expected_positions[isin] = expected_positions.get(isin, D(0)) - adjusted_qty
+
+            for t in csv_security_transfers:
+                isin = t.isin
+                if isin and t.num_shares:
+                    if isin not in isin_to_symbol:
+                        isin_to_symbol[isin] = self._get_beancount_symbol(t.ticker, isin)
+                    adjusted_qty = apply_splits_to_shares(isin, t.num_shares, t.time.date())
+                    if t.action == "Transfer in":
+                        expected_positions[isin] = expected_positions.get(isin, D(0)) + adjusted_qty
+                    else:
                         expected_positions[isin] = expected_positions.get(isin, D(0)) - adjusted_qty
         else:
             # No CSV data - cannot calculate expected positions
@@ -3555,6 +3688,7 @@ class Trading212Source(DescriptionBasedSource):
         dividend_actions = {a for t in self._csv_transactions for a in [t.action] if a.startswith("Dividend")}
         stock_split_actions = {"Stock split open", "Stock split close"}
         stock_distribution_actions = {"Stock distribution", "Custom stock distribution"}
+        security_transfer_actions = {"Transfer in", "Transfer out"}
 
         # Running balances
         cash: Dict[str, Decimal] = {}      # currency -> running cash balance
@@ -3667,6 +3801,12 @@ class Trading212Source(DescriptionBasedSource):
                 if isin and shares:
                     positions[isin] = positions.get(isin, D(0)) + shares
                     deltas.append((f"pos_{ticker or isin}", fmt_delta(shares), fmt_d(positions[isin])))
+
+            elif action in security_transfer_actions:
+                if isin and shares:
+                    pos_delta = shares if action == "Transfer in" else -shares
+                    positions[isin] = positions.get(isin, D(0)) + pos_delta
+                    deltas.append((f"pos_{ticker or isin}", fmt_delta(pos_delta), fmt_d(positions[isin])))
 
             else:
                 deltas.append(("???", f"total={total} {cur}", "UNHANDLED"))
